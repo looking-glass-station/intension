@@ -1,0 +1,11 @@
+/.venv/
+/data/
+/src/pre_build/
+/src/pretrained_models/
+
+
+# Text files with no extension containing tokens
+/tokens/google
+/tokens/huggingface
+/confs/download_configurations_/
+

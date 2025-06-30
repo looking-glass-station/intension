@@ -1,0 +1,23 @@
+{
+  "youtube": [
+    {
+      "channel_name_or_term": "DemocracyNow",
+      "use_google_api": true,
+      "max_date": "2025-01-01",
+      "is_playlist": false,
+      "is_search": false,
+      "min_length_mins": 1,
+      "must_contain": ["world headlines"],
+      "must_exclude": [],
+      "hosts": [
+        "Amy Goodman"
+      ],
+      "overwrite": false,
+      "get_static_videos": true,
+      "audio_only": true,
+      "guest_searches": [],
+      "episode_prefix": null,
+      "guest_replace": []
+    }
+  ]
+}

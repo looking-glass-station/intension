@@ -1,0 +1,23 @@
+{
+  "youtube": [
+    {
+      "channel_name_or_term": "CSPAN",
+      "use_google_api": true,
+      "max_date": null,
+      "is_playlist": true,
+      "is_search": false,
+      "min_length_mins": 1,
+      "must_contain": [],
+      "must_exclude": [],
+      "hosts": [
+        "Brian Lamb"
+      ],
+      "overwrite": false,
+      "get_static_videos": true,
+      "audio_only": true,
+      "guest_searches": [],
+      "episode_prefix": null,
+      "guest_replace": []
+    }
+  ]
+}
