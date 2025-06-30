@@ -1,0 +1,115 @@
+{
+  "LGBTQ+ Topics": {
+    "terms": [
+      "LGBTQ",
+      "transgender"
+    ],
+    "must_contain": [
+      "rainbow", "flag", "trans", "kids", "biological", "sex", "bathroom",
+      "gay", "sports", "puberty", "blockers", "conversion", "identity", "laws",
+      "sexual", "orientation", "pronoun", "enforcement", "visibility", "safe", "spaces",
+      "outing", "closeted", "passing", "nonconforming", "intersex", "queerbaiting", "representation",
+      "acceptance", "disclosure", "transition", "support", "ally", "activism", "fluidity",
+      "homophobia", "biphobia", "transphobia", "misgendering", "deadnaming", "affirmation", "dysphoria",
+      "inclusivity", "relationship", "labels", "community", "LGBTQIA", "pride", "drag",
+      "queen", "show", "gender", "affirming", "care", "transitioning", "hormone",
+      "top", "surgery", "bottom", "rights", "marriage", "queer", "pansexual",
+      "asexual", "nonbinary", "twospirit", "cisgender", "genderfluid"
+    ]
+  },
+  "Gender": {
+    "terms": [
+      "women",
+      "men",
+      "feminist"
+    ],
+    "must_contain": [
+      "him", "he", "his", "she", "her", "hers", "they",
+      "them", "girl", "boy", "male", "female", "lady", "man",
+      "woman", "wife", "husband", "miss", "mrs", "mr", "boyfriend",
+      "girlfriend", "partner", "bitch", "feminazi", "SJW", "woke", "patriarchy",
+      "toxic", "oppression", "equality", "misogyny", "misandry", "chivalry", "mansplain",
+      "androcentrism", "sexism", "stereotypes", "objectification", "roles", "machismo", "domestic",
+      "matriarchy", "femme", "butch", "identity", "transitioning", "pregnant", "reproduction",
+      "maternity", "paternity", "parenthood", "feminism", "masculinity", "femininity", "homosexuals",
+      "transgender", "cisgender", "nonbinary", "intersex", "genderfluid", "trans", "queer",
+      "lesbian", "gay", "asexual", "pronouns", "transition", "expression", "binary",
+      "biological", "gender", "Feminism", "Feminist", "shes"
+    ]
+  },
+  "Israel & Antisemitism": {
+    "terms": [
+      "antisemitism",
+      "Jewish"
+    ],
+    "must_contain": [
+      "genocide", "colonialism", "settler", "apartheid", "terrorism", "resistance", "displacement",
+      "diaspora", "rockets", "airstrikes", "antisemite", "Holocaust", "denial", "conspiracy",
+      "blood", "libel", "synagogue", "kippah", "antiZionism", "boycott", "divestment",
+      "sanctions", "BDS", "dehumanization", "antisemitic", "delegitimization", "occupation",
+       "incitement", "killing", "hostages", "refugees", "ethnonationalism", "expulsion",
+      "equivalence", "humanitarian", "blockade", "militants", "warcrime", "truce", "siege",
+      "zion", "Israel", "Zionism", "Zionist", "Judaism", "Palestine",
+      "Gaza", "West", "Bank", "settlements", "Hamas", "IDF", "intifada",
+      "Nakba", "two", "state", "Jerusalem", "Tel", "Aviv", "Netanyahu",
+      "Knesset", "Hezbollah", "Iran", "Ceasefire", "Haredi"
+    ]
+  },
+  "Politics": {
+    "terms": [
+      "Democrats",
+      "Republicans"
+    ],
+    "must_contain": [
+      "abortion", "accountability", "accountable", "agenda", "agendas", "agriculture", "alliances",
+      "america", "annexation", "arms", "asia", "pacific", "asymmetric", "australia",
+      "authoritarian", "authoritarianism", "beijing", "bias", "biased", "biodiversity", "border",
+      "borders", "capitalism", "capitalist", "carbon", "censor", "censored", "censors",
+      "censorship", "change", "changes", "charismatic", "china", "clickbait", "clickbaity",
+      "climate", "climatic", "communism", "communist", "conflict", "conservatism", "conservative",
+      "control", "controlled", "controlling", "corporate", "corporations", "credibility", "credible",
+      "criticism", "defence", "deforestation", "democracy", "democratic", "deterrence", "development",
+      "diplomacy", "diplomatic", "distrust", "diverse", "diversity", "division", "divisive",
+      "droughts", "economic", "economics", "economy", "education", "educational", "electric",
+      "elite", "elitism", "emails", "emissions", "energy", "engagements", "environmental",
+      "equal", "equality", "equity", "escalation", "espionage", "europe", "flooding",
+      "fossil fuels", "free", "freedom", "gatekeeper", "gatekeepers", "gatekeeping", "geopolitical",
+      "global", "globalisation", "globalism", "globalist", "green", "greenhouse", "gun",
+      "health", "healthcare", "heatwaves", "hegemony", "identities", "identity", "immigrant",
+      "immigrants", "immigration", "impeachment", "independence", "india", "industrialisation",
+      "inclusion", "inequality", "inequities", "inequity", "inflation", "infrastructure", "insurgency",
+      "integrity", "investment", "jerusalem", "job", "justice", "korea", "kremlin",
+      "leader", "leadership", "leftist", "leftwing", "legislation", "legislative", "liberty",
+      "lie", "maga", "methane", "mexico", "middle east", "militarized", "military",
+      "minorities", "minority", "misinform", "misinformation", "misinformed", "missile", "movement",
+      "movements", "narrative", "narratives", "nationalist", "naval", "navy", "negotiations",
+      "nuclear", "objective", "objectivity", "ocean", "oligarchy", "oppressed", "oppression",
+      "partisan", "partisans", "partisanship", "partnership", "patriot", "patriotic", "patriotism",
+      "peace", "polarising", "policies", "policy", "pollution", "popularity", "populism",
+      "populist", "privilege", "privileged", "progress", "progressive", "progressivism", "propaganda",
+      "propagandist", "propagandists", "protectionism", "protest", "protests", "proxy", "pyongyang",
+      "racism", "racist", "racists", "recycling", "reforestation", "reform", "reformist",
+      "reforms", "religion", "religious", "renewable", "represent", "representation", "revolution",
+      "revolutionary", "rightwing", "rivalry", "scandal", "secure", "security", "skeptic",
+      "skeptical", "skepticism", "socialism", "socialist", "solar", "sovereignty", "statecraft",
+      "strategy", "strongman", "subsidies", "superpower", "sustainable", "taiwan", "tariffs",
+      "taxation", "taxes", "trade", "trades", "treaties", "trumpism", "trust",
+      "trusting", "trustworthy", "truth", "truthful", "truthfulness", "unified", "unite",
+      "unity", "urbanisation", "urbanization", "value", "values", "war", "warfare",
+      "wealth", "wealthy", "welfare", "wind", "zionism", "politics", "defense",
+      "globalization", "industrialization", "polarizing", "activism", "advocacy", "affirmative", "amendment",
+      "anarchy", "ballot", "bipartisan", "bureaucracy", "campaign", "candidate", "caucus",
+      "civic", "autonomy", "coalition", "constituent", "constitution", "corruption", "debate",
+      "delegate", "disenfranchisement", "electoral", "empowerment", "entitlement", "federal", "federalism",
+      "filibuster", "speech", "gerrymandering", "governance", "grassroots", "immunity", "veto",
+      "whistleblower", "incumbent", "judiciary", "jurisdiction", "lawmaker", "legislature", "lobbyist",
+      "mandate", "majority", "minority", "nonpartisan", "petition", "vote", "platform",
+      "privatization", "ratification", "referendum", "sanction", "sovereign", "suffrage", "tax",
+      "constitutional", "unconstitutional", "UK", "kingdom", "afghanistan", "china", "cuba",
+      "iran", "iraq", "israel", "lebanon", "libya", "pakistan", "palestine",
+      "russia", "saudi", "arabia", "sudan", "syria", "turkey", "ukraine",
+      "venezuela", "yemen", "myanmar", "somalia", "nigeria", "egypt", "south korea",
+      "Trump", "Clinton", "Biden", "Bernie Sanders", "Obama", "Kamala Harris", "Elon Musk"
+    ]
+  }
+}

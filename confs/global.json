@@ -1,0 +1,15 @@
+{
+  "data_directory": "data",
+  "keep_raw_downloads": false,
+  "min_free_disk_space_gb": 5,
+  "youtube": {
+    "cookies_from": "firefox"
+  },
+  "max_workers_base": 2,
+  "host_match": {
+    "sample_file_count": 90,
+    "per_file_segment_count": 6,
+    "target_file_count": 20,
+    "overlap_tolerance": 0.25
+  }
+}
