@@ -231,7 +231,7 @@ def get_global_config() -> GlobalConfig:
     else:
         config_root = project_root
 
-    data_root = raw.get('data', 'data')
+    data_root = raw.get('data_directory', 'data')
     p_obj = Path(data_root)
     data = p_obj if p_obj.is_absolute() else config_root / p_obj
 
