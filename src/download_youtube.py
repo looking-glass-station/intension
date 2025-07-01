@@ -193,8 +193,13 @@ def main():
                 if not metadata.exists():
                     continue
 
+                metadata_records = csv_to_dict(metadata)
+                if not metadata_records:
+                    print(f"{cfg.name} ({cfg.channel_name_or_term}): No records to process.")
+                    continue
+
                 to_process = [
-                    r for r in sorted(csv_to_dict(metadata),
+                    r for r in sorted(metadata_records,
                                       key=lambda r: datetime.fromisoformat(r.get("date_uploaded", "1970-01-01")),
                                       reverse=True)
                     if r['sanitize_title'] not in (downloaded | wav_files)

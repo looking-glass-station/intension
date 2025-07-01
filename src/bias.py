@@ -48,7 +48,6 @@ def classify_bias_for_transcripts(
         bias_labels_file,
         topics,
         classifier,
-        progress,
 ):
     """
     Processes a single transcript file for bias classification, outputs CSV and Audacity label.
@@ -198,9 +197,7 @@ def main():
                     bias_labels_file = audacity_dir / f"{stem}.txt"
 
                     logger.info(f"Processing {transcript_file} for bias...")
-                    classify_bias_for_transcripts(transcript_file, bias_file, bias_labels_file, topics,
-                                                  classifier, progress
-                                                  )
+                    classify_bias_for_transcripts(transcript_file, bias_file, bias_labels_file, topics, classifier)
 
     logger.info("Bias classification completed.")
 

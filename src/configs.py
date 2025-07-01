@@ -205,6 +205,7 @@ class GlobalConfig:
     keep_raw_downloads: bool
     max_workers_base: int
     min_free_disk_space_gb: int
+    reverse_processing_order: bool
     host_match: HostMatchConfig
     google_token: str
     hf_token: str
@@ -237,6 +238,7 @@ def get_global_config() -> GlobalConfig:
     youtube_conf = YouTubeGlobalConfig(**raw.get('youtube', {}))
     max_workers_base = raw.get('max_workers_base', 1)
     min_free_disk_space_gb = raw.get('min_free_disk_space_gb', 5)
+    reverse_processing_order = raw.get('reverse_processing_order', False)
     keep_raw_downloads = raw.get('keep_raw_downloads', True)
     host_match_raw = raw.get('host_match', {})
     host_match_conf = HostMatchConfig(
@@ -254,6 +256,7 @@ def get_global_config() -> GlobalConfig:
         youtube=youtube_conf,
         max_workers_base=max_workers_base,
         min_free_disk_space_gb=min_free_disk_space_gb,
+        reverse_processing_order=reverse_processing_order,
         keep_raw_downloads=keep_raw_downloads,
         host_match=host_match_conf,
         google_token=google_token,
@@ -277,7 +280,12 @@ def get_configs() -> List[ChannelConfig]:
 
     gc = get_global_config()
     configs_dir = gc.project_root / 'confs' / 'download_configurations'
-    for config_file in configs_dir.glob('*.json'):
+
+    config_files = list(configs_dir.glob('*.json'))
+    if gc.reverse_processing_order:
+        config_files = config_files[::-1]
+
+    for config_file in config_files:
         name = config_file.stem
         raw = json.loads(config_file.read_text(encoding='utf-8'))
 

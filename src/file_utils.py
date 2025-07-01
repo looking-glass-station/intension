@@ -32,11 +32,18 @@ def file_writable_test(file_path: Path) -> None:
         raise IOError(f"FILE IS PROBABLY OPEN!!!: {file_path}")
 
 
-def csv_to_dict(csv_file: Path) -> List[Dict[str, Any]] | None:
+def csv_to_dict(csv_file: Path, reverse: bool = False) -> List[Dict[str, Any]] | None:
     """
     Reads a CSV into a list of dicts using pandas, skipping the first row if it's a header row duplicate.
-    """
+    If reverse is True, the order of the returned records is reversed.
 
+    Args:
+        csv_file (Path): Path to the CSV file.
+        reverse (bool): Whether to reverse the order of records.
+
+    Returns:
+        List[Dict[str, Any]] | None: List of dictionaries representing the rows, or None if the file is empty.
+    """
     if csv_file.stat().st_size <= 2:
         return None
 
@@ -48,7 +55,8 @@ def csv_to_dict(csv_file: Path) -> List[Dict[str, Any]] | None:
     if df.columns.tolist() == df.iloc[0].tolist():
         df = df.iloc[1:]
 
-    return df.to_dict(orient='records')
+    records = df.to_dict(orient='records')
+    return records[::-1] if reverse else records
 
 
 def get_audio_files(input_dir: Path) -> List[Path]:
@@ -80,23 +88,29 @@ def parse_rttm(rttm_file: Path) -> List[Dict[str, Any]]:
     return segments
 
 
+from pathlib import Path
+from typing import List
+
 def filter_files_by_stems(
         source_dir: Path,
         source_extension: str,
         filter_stems_dirs: List[Path],
-        overwrite: bool = False
+        overwrite: bool = False,
+        reverse: bool = False,
 ) -> List[Path]:
     """
-    Return files from source_dir whose stems do NOT exist in all filter_stems_dirs.
+    Return files from source_dir whose stems do NOT exist in all filter_stems_dirs,
+    or the reverse if reverse=True.
 
     Args:
         source_dir (Path): Directory containing source files.
-        source_extension (str): File extension for source dir
+        source_extension (str): File extension for source dir.
         filter_stems_dirs (List[Path]): List of directories to filter by stem presence.
         overwrite (bool, optional): If True, return all files in source_dir. Defaults to False.
+        reverse (bool, optional): If True, invert the filter results. Defaults to False.
 
     Returns:
-        List[Path]: List of files from source_dir that are NOT present in all filter_stems_dirs by stem.
+        List[Path]: Filtered list of files from source_dir.
     """
     files = [p for p in source_dir.glob(f'*.{source_extension}')]
 
@@ -109,12 +123,17 @@ def filter_files_by_stems(
         for filter_dir in filter_stems_dirs
     ]
 
-    # Only include files whose stem does NOT exist in all filter stem sets
+    # Main filtering
+    def stem_in_all_sets(stem: str) -> bool:
+        return all(stem in stem_set for stem_set in filter_stem_sets)
+
     result = [
         f for f in files
-        if not all(f.stem in stem_set for stem_set in filter_stem_sets)
+        if (stem_in_all_sets(f.stem) if reverse else not stem_in_all_sets(f.stem))
     ]
+
     return result
+
 
 
 def dict_to_csv(

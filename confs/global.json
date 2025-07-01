@@ -2,6 +2,7 @@
   "data_directory": "data",
   "keep_raw_downloads": false,
   "min_free_disk_space_gb": 5,
+  "reverse_processing_order": false,
   "youtube": {
     "cookies_from": "firefox"
   },
