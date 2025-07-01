@@ -17,6 +17,7 @@ if __name__ == '__main__':
         root / "src" / "bias.py",
         root / "src" / "topics.py",
     ]
+
     for script in scripts:
         pipeline_helper.run_script(script)
 
