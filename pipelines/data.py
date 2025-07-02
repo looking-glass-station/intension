@@ -10,7 +10,7 @@ if __name__ == '__main__':
     """
     root = Path(__file__).parent.parent
     scripts = [
-        #root / "src" / "diarize.py",
+        root / "src" / "diarize.py",
         root / "src" / "transcribe.py",
         root / "src" / "generate_host_match.py",
         root / "src" / "label_speakers.py",
