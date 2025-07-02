@@ -160,6 +160,10 @@ def main():
                     bar.set_description(f"{cfg.name} ({cfg.channel_name_or_term}) - {file.stem}")
 
                     topics_csv = topics_path / file.name
+
+                    if topics_csv.exists():
+                        continue
+
                     subjects = get_transcript_subjects(file, ner_pipeline)
                     dict_to_csv(topics_csv, subjects)
 

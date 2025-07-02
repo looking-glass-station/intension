@@ -128,6 +128,10 @@ def main():
                     wav_file = wav_folder / f"{stem}.wav"
                     transcript_labeled = labeled_folder / f"{stem}.csv"
                     audacity_file = audacity_folder / f"{stem}.txt"
+
+                    if transcript_labeled.exists() and audacity_file.exists():
+                        continue
+
                     if wav_file.exists():
                         files_to_label.append(
                             (wav_file, transcript_file, transcript_labeled, audacity_file, encoder, emb_entries))
