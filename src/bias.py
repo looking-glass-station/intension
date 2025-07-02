@@ -196,6 +196,9 @@ def main():
                     bias_file = bias_dir / f"{stem}.csv"
                     bias_labels_file = audacity_dir / f"{stem}.txt"
 
+                    if bias_file.exists() and bias_labels_file.exists():
+                        continue
+
                     logger.info(f"Processing {transcript_file} for bias...")
                     classify_bias_for_transcripts(transcript_file, bias_file, bias_labels_file, topics, classifier)
 

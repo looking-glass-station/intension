@@ -6,6 +6,7 @@ from pathlib import Path
 import torch
 from tqdm_sound import TqdmSound
 from whisperx.diarize import DiarizationPipeline
+from pyannote.audio import Pipeline
 
 import system_config
 from configs import get_global_config, get_configs
@@ -24,21 +25,21 @@ class Diarizer:
         self.model = self._load_model()
 
     def _load_model(self):
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            model = DiarizationPipeline(
+        from whisperx.diarize import DiarizationPipeline
+
+        try:
+            diarizer = DiarizationPipeline(
+                model_name="pyannote/speaker-diarization-3.1",
                 use_auth_token=self.global_config.hf_token,
                 device=system_config.device
             )
-            try:
-                model.model = model.model.half()
-            except Exception:
-                pass
-            if sys.platform != "win32":
-                try:
-                    model.model = torch.compile(model.model, mode="reduce-overhead")
-                except Exception:
-                    pass
-        return model
+            if diarizer.model is None:
+                raise RuntimeError("DiarizationPipeline.model is None — likely due to missing HF token access.")
+            return diarizer
+        except Exception as e:
+            self.logger.error(f"Failed to load WhisperX diarization pipeline: {e}")
+            raise
+
 
     def diarize_file(self, wav_file: Path, output_dir: Path = None):
         """
@@ -55,6 +56,10 @@ class Diarizer:
         # Ensure output dirs exist
         rttm_path.parent.mkdir(parents=True, exist_ok=True)
         audacity_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if rttm_path.exists() and audacity_path.exists():
+            self.logger.info(f"Diarizing skipped: {rttm_path.name}")
+            return
 
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             result = self.model(str(wav_file))
