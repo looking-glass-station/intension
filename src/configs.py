@@ -287,7 +287,11 @@ def get_configs() -> List[ChannelConfig]:
 
     for config_file in config_files:
         name = config_file.stem
-        raw = json.loads(config_file.read_text(encoding='utf-8'))
+
+        try:
+            raw = json.loads(config_file.read_text(encoding='utf-8'))
+        except Exception as e:
+            print(f"Error loading: {config_file} with {e}")
 
         youtube_items = raw.get('youtube', [])
         twitch_items = raw.get('twitch', [])

@@ -250,17 +250,17 @@ def main():
 
                 satisfied_configs.append(cfg.channel_name_or_term)
 
-        # Final summary
-        if satisfied_configs:
-            print(f"[*] Configurations satisfied: {', '.join(sorted(satisfied_configs))}")
-        else:
-            print("[ ] No configurations satisfied.")
+    # Final summary
+    if satisfied_configs:
+        print(f"[*] Configurations satisfied: {', '.join(sorted(satisfied_configs))}")
+    else:
+        print("[ ] No configurations satisfied.")
 
-        if unsatisfied_configs:
-            print(
-                f"Configs skipped due to insufficient data (RTTM/WAV pairs): "
-                f"{', '.join(sorted(unsatisfied_configs))}"
-            )
+    if unsatisfied_configs:
+        print(
+            f"[ ] Configs skipped due to insufficient data (RTTM/WAV pairs): "
+            f"{', '.join(sorted(unsatisfied_configs))}"
+        )
 
 
 if __name__ == "__main__":
