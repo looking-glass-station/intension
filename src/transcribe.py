@@ -246,8 +246,6 @@ class Transcriber:
                     transcription_dir = channel_data_dir / 'transcription'
                     transcription_audacity_dir = channel_data_dir / 'transcription_audacity'
 
-                    if transcription_dir.exists() and transcription_audacity_dir.exists():
-                        continue
 
                     rttm_files = filter_files_by_stems(
                         rttm_dir, 'rttm', [transcription_dir, transcription_audacity_dir]
