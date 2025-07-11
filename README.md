@@ -149,6 +149,9 @@ Process data:
 
 `python -m pipelines.data`
 
+Process all:
+
+`python -m pipelines.all`
 
 ## 📋 Compatibility
 Tested on Windows 11\Debian with an AMD CPU and NVIDIA 4070 and on an Intel CPU and NVIDIA 2050.
