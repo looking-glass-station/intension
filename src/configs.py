@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -7,6 +8,21 @@ import marshmallow.fields as ma_fields
 from dataclasses_json import dataclass_json, config
 
 from file_utils import csv_to_dict
+
+
+def _coerce_bool(value: Any) -> bool:
+    """
+    Convert common truthy/falsey inputs (including strings like 'false') to a boolean.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        val = value.strip().lower()
+        if val in {"1", "true", "yes", "y", "on"}:
+            return True
+        if val in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return bool(value)
 
 
 @dataclass
@@ -43,6 +59,7 @@ class YouTubeConfig:
     must_contain: List[str]
     must_exclude: List[str]
     hosts: List[str]
+    no_transcript: bool = False
 
     # Computed, not serialized
     host_embeddings: List[HostEmbedding] = field(
@@ -114,6 +131,7 @@ class TwitchConfig:
     must_contain: List[str]
     must_exclude: List[str]
     hosts: List[str]
+    no_transcript: bool = False
 
     # Computed, not serialized
     host_embeddings: List[HostEmbedding] = field(
@@ -211,6 +229,8 @@ class GlobalConfig:
     hf_token: str
     log_dir: Path
     project_root: Path
+    diarization_backend: Optional[str] = None
+    diarization_backend_nemo: bool = False
 
 
 def get_global_config() -> GlobalConfig:
@@ -249,7 +269,18 @@ def get_global_config() -> GlobalConfig:
 
     google_token = (config_root / 'tokens' / 'google').read_text().strip()
     hf_token = (config_root / 'tokens' / 'huggingface').read_text().strip()
+    # Propagate HF token to env for libraries (e.g., pyannote) that read from HF_TOKEN/HUGGINGFACE_TOKEN.
+    if hf_token:
+        os.environ.setdefault("HF_TOKEN", hf_token)
+        os.environ.setdefault("HUGGINGFACE_TOKEN", hf_token)
     log_dir = config_root / 'logs'
+    backend_raw = raw.get('diarization_backend')
+    backend_normalized: Optional[str] = None
+    if isinstance(backend_raw, str):
+        backend_normalized = backend_raw.strip().lower() or None
+    elif isinstance(backend_raw, bool):
+        backend_normalized = "nemo" if backend_raw else "pyannote"
+    backend_nemo_flag = _coerce_bool(raw.get('diarization_backend_nemo', False))
 
     return GlobalConfig(
         data_directory=data,
@@ -262,7 +293,9 @@ def get_global_config() -> GlobalConfig:
         google_token=google_token,
         hf_token=hf_token,
         log_dir=log_dir,
-        project_root=config_root
+        project_root=config_root,
+        diarization_backend=backend_normalized,
+        diarization_backend_nemo=backend_nemo_flag,
     )
 
 

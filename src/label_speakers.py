@@ -1,6 +1,7 @@
 import concurrent.futures
 import csv
 import os
+import re
 from pathlib import Path
 from typing import List
 
@@ -95,6 +96,48 @@ def main():
             for cfg in config_list:
                 data_out = cfg.output_path
                 training_folder = data_out / 'training'
+
+                # If transcripts are intentionally skipped, just write host name label files per recording.
+                if getattr(cfg, "no_transcript", False):
+                    wav_folder = data_out / "wav"
+                    audacity_host_folder = data_out / "audacity_labels_hostnames"
+                    diarized_audacity_folder = data_out / "audacity_labels"
+                    if not wav_folder.exists():
+                        logger.info(f"No wav folder for: {cfg.name} ({cfg.channel_name_or_term})")
+                        continue
+                    if not (cfg.hosts or []):
+                        logger.info(f"No hosts defined for: {cfg.name} ({cfg.channel_name_or_term})")
+                        continue
+                    audacity_host_folder.mkdir(parents=True, exist_ok=True)
+                    for wav_file in wav_folder.glob("*.wav"):
+                        label_path = audacity_host_folder / f"{wav_file.stem}.txt"
+                        diarized_label_path = diarized_audacity_folder / f"{wav_file.stem}.txt"
+                        if diarized_label_path.exists():
+                            # Rewrite diarized labels replacing SPEAKER_* with host names when possible.
+                            out_lines = []
+                            speaker_re = re.compile(r"SPEAKER_(\d+)")
+                            for line in diarized_label_path.read_text(encoding="utf-8").splitlines():
+                                parts = line.split("\t")
+                                if len(parts) >= 3:
+                                    tag = parts[2]
+                                    m = speaker_re.match(tag)
+                                    if m:
+                                        idx = int(m.group(1))
+                                        if 0 <= idx < len(cfg.hosts):
+                                            parts[2] = cfg.hosts[idx]
+                                    out_lines.append("\t".join(parts))
+                            label_path.write_text("\n".join(out_lines) + ("\n" if out_lines else ""), encoding="utf-8")
+                            logger.info(f"Wrote host-mapped labels for {wav_file.stem}")
+                        else:
+                            # No diarized labels; just emit a mapping of speaker tags to hosts.
+                            lines = []
+                            for idx, host in enumerate(cfg.hosts):
+                                speaker_tag = f"SPEAKER_{idx:02d}"
+                                lines.append(f"0.000000\t0.010000\t{speaker_tag} {host}\n")
+                            label_path.write_text("".join(lines), encoding="utf-8")
+                            logger.info(f"Wrote host mapping labels for {wav_file.stem}")
+                    continue
+
                 if not training_folder.exists():
                     continue
 

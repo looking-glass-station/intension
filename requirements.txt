@@ -1,0 +1,26 @@
+torch==2.5.1+cu118
+torchaudio==2.5.1+cu118
+--extra-index-url https://download.pytorch.org/whl/cu118
+
+whisperx<3.5
+pyannote.audio
+transformers
+numpy==1.26.4
+pandas
+librosa
+soundfile
+resemblyzer
+tqdm-sound
+ffmpeg-python
+pillow
+dataclasses-json
+marshmallow
+pathvalidate
+inflect
+dateparser
+isodate
+google-api-python-client
+scrapetube
+yt-dlp
+yt-dlp-ejs
+twitch-dl

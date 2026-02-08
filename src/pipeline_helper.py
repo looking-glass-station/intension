@@ -12,7 +12,8 @@ def run_script(script_path):
     :return:
     """
     label = Path(script_path).stem
-    print(f"[*] {label.replace("_", " ").title()}")
+    print(f"[*] {label.replace('_', ' ').title()}")
+
 
     result = subprocess.run([sys.executable, str(script_path)])
     if result.returncode != 0:
