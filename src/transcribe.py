@@ -81,7 +81,13 @@ class Transcriber:
     def make_url(cfg, filename: str, start: int) -> str:
         config_type = type(cfg).__name__
         start = int(start)
-        video_id = cfg.get_metadata_by_filename(filename)['video_id']
+
+        metadata = cfg.get_metadata_by_filename(filename)
+        if not metadata:
+            return ""
+        video_id = metadata.get("video_id")
+        if not video_id:
+            return ""
 
         url = None
         if config_type == 'YouTubeConfig':
@@ -101,7 +107,7 @@ class Transcriber:
             wav_file: Path,
             transcript_file: Path,
             audacity_file: Path,
-            cfg: Any
+            cfg: Any = None
     ) -> None:
         """
         Perform ASR on segments defined in an RTTM file and write transcript CSV and Audacity label file.
@@ -144,7 +150,10 @@ class Transcriber:
             end = seg.get("end_time")
 
             filename = wav_file.stem
-            url = self.make_url(cfg, filename, start)
+
+            url = ''
+            if cfg is not None:
+                url = self.make_url(cfg, filename, start)
 
             transcript_rows.append({
                 "speaker": seg.get("speaker"),

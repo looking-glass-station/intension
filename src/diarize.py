@@ -2,6 +2,7 @@ import contextlib
 import io
 import sys
 from pathlib import Path
+from typing import Optional
 
 import torch
 from tqdm_sound import TqdmSound
@@ -28,6 +29,12 @@ class Diarizer:
         from whisperx.diarize import DiarizationPipeline
 
         try:
+            # PyTorch 2.6 defaults to weights_only=True and blocks some globals.
+            # Allow trusted pyannote checkpoint classes used during load.
+            from pyannote.audio.core.task import Problem, Resolution, Specifications
+            torch.serialization.add_safe_globals(
+                [torch.torch_version.TorchVersion, Specifications, Problem, Resolution]
+            )
             diarizer = DiarizationPipeline(
                 model_name="pyannote/speaker-diarization-3.1",
                 use_auth_token=self.global_config.hf_token,
@@ -41,7 +48,7 @@ class Diarizer:
             raise
 
 
-    def diarize_file(self, wav_file: Path, output_dir: Path = None):
+    def diarize_file(self, wav_file: Path, output_dir: Path = None, host_count: Optional[int] = None):
         """
         Diarizes a wav file and writes RTTM and Audacity label files.
         """
@@ -61,8 +68,12 @@ class Diarizer:
             self.logger.info(f"Diarizing skipped: {rttm_path.name}")
             return
 
+        # dont do this, too many hosts use random clips
+        #max_speakers = host_count + 2 if host_count is not None else None
+        #diarization_kwargs = {"max_speakers": max_speakers} if max_speakers is not None else {}
+        diarization_kwargs={}
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            result = self.model(str(wav_file))
+            result = self.model(str(wav_file), **diarization_kwargs)
 
         diarize_df = (
             result.get("diarization") if isinstance(result, dict) and "diarization" in result else result
@@ -143,7 +154,7 @@ class Diarizer:
 
                     for wav_file in wav_files:
                         bar.set_description(f"{cfg_name} ({cfg_id}): {wav_file.stem}")
-                        self.diarize_file(wav_file, channel_data_dir)
+                        self.diarize_file(wav_file, channel_data_dir, host_count=len(cfg.hosts))
                         bar.update(1)
 
                     bar.close()

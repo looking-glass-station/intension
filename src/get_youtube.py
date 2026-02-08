@@ -1,12 +1,15 @@
 import itertools
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import dateparser
 import isodate
 import scrapetube
+import soundfile as sf
 from googleapiclient.discovery import build
+from pathvalidate import sanitize_filename
 from tqdm_sound import TqdmSound
 
 import file_utils
@@ -22,6 +25,23 @@ progress = TqdmSound(
     activity_mute_seconds=0,
     dynamic_settings_file=str(global_config.project_root / "confs" / "sound.json")
 )
+
+
+def get_wav_duration_seconds(base_output: Path, sanitized_title: str) -> Optional[float]:
+    """
+    Return WAV duration in seconds if the file exists, else None.
+    """
+    if not base_output:
+        return None
+    wav_path = base_output / "wav" / f"{sanitize_filename(sanitized_title)}.wav"
+    if not wav_path.exists():
+        return None
+    try:
+        info = sf.info(str(wav_path))
+        return float(info.frames) / float(info.samplerate) if info.samplerate else None
+    except Exception:
+        logger.warning(f"Failed to read duration for {wav_path}")
+        return None
 
 
 def parse_duration(text: str) -> Optional[int]:
@@ -207,8 +227,7 @@ def fetch_all_raw_metadata() -> None:
     )
     for config in config_bar:
         config_bar.set_description(f"{config.name}"
-                                   f" ({getattr(config, 'channel_name_or_term',
-                                                getattr(config, 'channel_name_playlist_id', ''))}) - Fetching metadata")
+                                   f" ({getattr(config, 'channel_name_or_term', getattr(config, 'channel_name_playlist_id', ''))}) - Fetching metadata")
         base_input = config.input_path
         in_dir = base_input / "metadata"
         in_dir.mkdir(parents=True, exist_ok=True)
@@ -409,24 +428,27 @@ def parse_and_filter_raw_records(
         if max_date_obj and dt <= max_date_obj:
             continue
 
-        dur_secs = item.get("duration", 0)
-        if dur_secs < config.min_length_mins * 60:
+        source_duration = item.get("duration", 0)
+        if source_duration < config.min_length_mins * 60:
             continue
 
         title_parser = EpisodeTitleParser(item["title"], config)
         parsed_guest = title_parser.extract_guest()
         parsed_episode_number = title_parser.extract_episode_number()
+        sanitized = sanitize_title(title)
+        wav_duration = get_wav_duration_seconds(config.output_path, sanitized)
 
         filtered.append({
             "title": title,
-            "sanitize_title": sanitize_title(title),
+            "sanitize_title": sanitized,
             "date_uploaded": item.get("date_uploaded", ""),
             "parsed_guest": parsed_guest,
             "parsed_episode_number": parsed_episode_number,
             "video_id": item.get("video_id", ""),
             "likes": item.get("likes", 0),
-            "url": f"https://www.youtube.com/watch?v={item.get("video_id", "")}",
-
+            "url": f"https://www.youtube.com/watch?v={item.get('video_id', '')}",
+            "duration": wav_duration if wav_duration is not None else source_duration,
+            "source_duration": source_duration,
         })
 
     return filtered
