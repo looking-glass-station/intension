@@ -7,6 +7,14 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 import soundfile as sf
+import torch
+import contextlib
+from collections import defaultdict
+from typing import Any
+
+from omegaconf.base import ContainerMetadata
+from omegaconf.listconfig import ListConfig
+from pyannote.audio.core.task import Specifications, Problem, Resolution
 from librosa import load
 from pyannote.audio import Pipeline, Model
 from pyannote.audio.pipelines import OverlappedSpeechDetection
@@ -87,18 +95,62 @@ def main():
     satisfied_configs = []
     unsatisfied_configs = []
 
-    # Initialize diarization pipeline
-    pipeline = Pipeline.from_pretrained(
-        'pyannote/speaker-diarization-3.1',
-        use_auth_token=global_config.hf_token
-    )
-    pipeline.to(system_config.torch_device)
+    # Initialize diarization pipeline (PyTorch 2.6+ changed torch.load defaults)
+    @contextlib.contextmanager
+    def _torch_load_weights_only_disabled():
+        orig_load = torch.load
 
-    # Initialize overlap detection model
-    seg_model = Model.from_pretrained(
-        'pyannote/segmentation',
-        use_auth_token=global_config.hf_token
+        def _patched_load(*args, **kwargs):
+            # Force weights_only=False even if caller passes True (PyTorch 2.6 default)
+            kwargs["weights_only"] = False
+            return orig_load(*args, **kwargs)
+
+        torch.load = _patched_load
+        try:
+            yield
+        finally:
+            torch.load = orig_load
+
+    # Allowlist globals required by pyannote checkpoints under weights-only mode
+    safe_globals = [
+        torch.torch_version.TorchVersion,
+        Specifications,
+        Problem,
+        Resolution,
+        ListConfig,
+        ContainerMetadata,
+        Any,
+        list,
+        defaultdict,
+        dict,
+    ]
+
+    safe_ctx = (
+        torch.serialization.safe_globals(safe_globals)
+        if hasattr(torch.serialization, "safe_globals")
+        else None
     )
+    with _torch_load_weights_only_disabled():
+        if safe_ctx:
+            with safe_ctx:
+                pipeline = Pipeline.from_pretrained(
+                    'pyannote/speaker-diarization-3.1',
+                    use_auth_token=global_config.hf_token
+                )
+                seg_model = Model.from_pretrained(
+                    'pyannote/segmentation',
+                    use_auth_token=global_config.hf_token
+                )
+        else:
+            pipeline = Pipeline.from_pretrained(
+                'pyannote/speaker-diarization-3.1',
+                use_auth_token=global_config.hf_token
+            )
+            seg_model = Model.from_pretrained(
+                'pyannote/segmentation',
+                use_auth_token=global_config.hf_token
+            )
+    pipeline.to(system_config.torch_device)
     osd = OverlappedSpeechDetection(segmentation=seg_model)
     osd.instantiate({
         'onset': 1 - getattr(global_config.host_match, 'overlap_tolerance', 0.5),
