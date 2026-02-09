@@ -12,5 +12,6 @@
     "per_file_segment_count": 6,
     "target_file_count": 20,
     "overlap_tolerance": 0.25
-  }
+  },
+  "diarization_backend_nemo": true
 }
