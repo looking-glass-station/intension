@@ -10,7 +10,7 @@ from whisperx.diarize import DiarizationPipeline
 from pyannote.audio import Pipeline
 
 import system_config
-from configs import get_global_config, get_configs
+from configs import get_global_config, iter_processing_configs
 from file_utils import filter_files_by_stems, audacity_writer
 from logger import global_logger
 
@@ -113,51 +113,46 @@ class Diarizer:
             dynamic_settings_file=str(self.global_config.project_root / "confs" / "sound.json")
         )
 
-        for channel_config in get_configs():
-            for config_list in vars(channel_config.download_configs).values():
-                if not isinstance(config_list, list) or not config_list:
-                    continue
+        for cfg in iter_processing_configs(include_manual=True):
+            cfg_id = cfg.channel_name_or_term
+            cfg_name = cfg.name
+            channel_data_dir = cfg.output_path
 
-                for cfg in config_list:
-                    cfg_id = cfg.channel_name_or_term
-                    cfg_name = cfg.name
-                    channel_data_dir = cfg.output_path
+            if not channel_data_dir:
+                continue
 
-                    if not channel_data_dir:
-                        continue
+            wav_dir = channel_data_dir / "wav"
+            rttm_dir = channel_data_dir / 'rttm'
+            audacity_dir = channel_data_dir / 'audacity_labels'
 
-                    wav_dir = channel_data_dir / "wav"
-                    rttm_dir = channel_data_dir / 'rttm'
-                    audacity_dir = channel_data_dir / 'audacity_labels'
+            rttm_dir.mkdir(parents=True, exist_ok=True)
+            audacity_dir.mkdir(parents=True, exist_ok=True)
 
-                    rttm_dir.mkdir(parents=True, exist_ok=True)
-                    audacity_dir.mkdir(parents=True, exist_ok=True)
+            if not wav_dir.exists():
+                continue
 
-                    if not wav_dir.exists():
-                        continue
+            wav_files = filter_files_by_stems(wav_dir, 'wav', [rttm_dir, audacity_dir])
 
-                    wav_files = filter_files_by_stems(wav_dir, 'wav', [rttm_dir, audacity_dir])
+            if not wav_files:
+                self.logger.info(f"No files to diarize for: {cfg_name} ({cfg_id})")
+                print(f"No files to diarize for: {cfg_name} ({cfg_id})")
+                continue
 
-                    if not wav_files:
-                        self.logger.info(f"No files to diarize for: {cfg_name} ({cfg_id})")
-                        print(f"No files to diarize for: {cfg_name} ({cfg_id})")
-                        continue
+            bar = progress.progress_bar(
+                wav_files,
+                total=len(wav_files),
+                desc=f"{cfg_name} ({cfg_id}): Diarizing",
+                unit="file",
+                leave=True,
+                ten_percent_ticks=True,
+            )
 
-                    bar = progress.progress_bar(
-                        wav_files,
-                        total=len(wav_files),
-                        desc=f"{cfg_name} ({cfg_id}): Diarizing",
-                        unit="file",
-                        leave=True,
-                        ten_percent_ticks=True,
-                    )
+            for wav_file in wav_files:
+                bar.set_description(f"{cfg_name} ({cfg_id}): {wav_file.stem}")
+                self.diarize_file(wav_file, channel_data_dir, host_count=len(cfg.hosts))
+                bar.update(1)
 
-                    for wav_file in wav_files:
-                        bar.set_description(f"{cfg_name} ({cfg_id}): {wav_file.stem}")
-                        self.diarize_file(wav_file, channel_data_dir, host_count=len(cfg.hosts))
-                        bar.update(1)
-
-                    bar.close()
+            bar.close()
 
 
 def main():

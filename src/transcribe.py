@@ -1,21 +1,15 @@
-import concurrent.futures
-import contextlib
-import io
 import logging
 import warnings
 from pathlib import Path
 from typing import Union, Any
 
-import torch
-import torchaudio
+from faster_whisper import WhisperModel
 from tqdm_sound import TqdmSound
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
-from transformers import logging as hf_logging
 
-from configs import get_configs, get_global_config
+from configs import get_global_config, iter_processing_configs
 from file_utils import parse_rttm, filter_files_by_stems, dict_to_csv, audacity_writer
 from logger import global_logger
-from system_config import device, torch_dtype, is_cuda, max_workers
+from system_config import is_cuda
 
 
 class Transcriber:
@@ -23,58 +17,32 @@ class Transcriber:
     Handles ASR transcription for WAV+RTTM pairs, manages model and processor.
     """
 
-    MODEL_ID = "distil-whisper/distil-large-v3"
+    MODEL_ID = "Systran/faster-distil-whisper-large-v3"
 
     def __init__(self):
         self._init_libs()
         self.logger = global_logger("transcription")
         self.global_config = get_global_config()
         self.model = self._load_model()
-        self.processor = self._load_processor()
-        self.pipeline = self._build_pipeline()
 
     def _init_libs(self):
         """
-        Handle all logger/warning suppression and deferred imports.
+        Handle all logger/warning suppression.
         """
-        hf_logging.set_verbosity_error()
-        logging.getLogger("transformers").setLevel(logging.ERROR)
-
-        # FutureWarning suppressions
+        logging.getLogger("faster_whisper").setLevel(logging.ERROR)
         warnings.filterwarnings(
             "ignore",
             message=".*The input name `inputs` is deprecated.*",
             category=FutureWarning,
         )
 
-        # Defer heavy imports to here and hide their chatter
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
-
     def _load_model(self):
-        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        compute_type = "float16" if is_cuda else "float32"
+        device = "cuda" if is_cuda else "cpu"
+        return WhisperModel(
             self.MODEL_ID,
-            torch_dtype=torch_dtype,
-            low_cpu_mem_usage=True,
-            use_safetensors=True,
-        ).to(device)
-        if is_cuda:
-            model = model.half()
-        return model
-
-    def _load_processor(self):
-        return AutoProcessor.from_pretrained(self.MODEL_ID)
-
-    def _build_pipeline(self):
-        return pipeline(
-            "automatic-speech-recognition",
-            model=self.model,
-            tokenizer=self.processor.tokenizer,
-            feature_extractor=self.processor.feature_extractor,
-            torch_dtype=torch_dtype,
             device=device,
-            chunk_length_s=30,
-            batch_size=32,
+            compute_type=compute_type,
         )
 
     @staticmethod
@@ -119,37 +87,24 @@ class Transcriber:
             audacity_file.write_text("", encoding="utf-8")
             return
 
-        waveform, sr = torchaudio.load(wav_file)
-        audio_items = []
+        transcript_rows = []
+        audacity_rows = []
+        filename = wav_file.stem
+
         for seg in segments:
             start = seg.get("start_time")
             end = seg.get("end_time")
             if (end - start) < 0.5:
                 continue
 
-            start_sample = int(start * sr)
-            end_sample = int(end * sr)
-            audio_seg = waveform[:, start_sample:end_sample].squeeze().numpy()
-            audio_items.append((seg, audio_seg))
-
-        workers = max_workers(multiplier=1)
-
-        def _transcribe(item):
-            seg, audio = item
-            with torch.no_grad():
-                result = self.pipeline([audio])[0]
-            return seg, result.get("text", "").strip()
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            results = list(executor.map(_transcribe, audio_items))
-
-        transcript_rows = []
-        audacity_rows = []
-        for seg, text in results:
-            start = seg.get("start_time")
-            end = seg.get("end_time")
-
-            filename = wav_file.stem
+            result_segments, _ = self.model.transcribe(
+                str(wav_file),
+                language="en",
+                clip_timestamps=f"{start},{end}",
+                vad_filter=False,
+                without_timestamps=True,
+            )
+            text = " ".join(s.text.strip() for s in result_segments).strip()
 
             url = ''
             if cfg is not None:
@@ -162,7 +117,6 @@ class Transcriber:
                 "duration": end - start,
                 "text": text,
                 "timestamp_url": url
-
             })
             audacity_rows.append({
                 "start_time": start,
@@ -237,49 +191,43 @@ class Transcriber:
             dynamic_settings_file=str(self.global_config.project_root / "confs" / "sound.json")
         )
 
-        for channel_cfg in get_configs():
-            for config_list in vars(channel_cfg.download_configs).values():
-                if not isinstance(config_list, list) or not config_list:
-                    continue
+        for cfg in iter_processing_configs(include_manual=True):
+            wav_dir = cfg.output_path / "wav"
+            if not wav_dir.exists():
+                continue
 
-                for cfg in config_list:
-                    wav_dir = cfg.output_path / "wav"
-                    if not wav_dir.exists():
-                        continue
+            channel_data_dir = cfg.output_path
+            if not channel_data_dir:
+                continue
 
-                    channel_data_dir = cfg.output_path
-                    if not channel_data_dir:
-                        continue
+            rttm_dir = channel_data_dir / 'rttm'
+            transcription_dir = channel_data_dir / 'transcription'
+            transcription_audacity_dir = channel_data_dir / 'transcription_audacity'
 
-                    rttm_dir = channel_data_dir / 'rttm'
-                    transcription_dir = channel_data_dir / 'transcription'
-                    transcription_audacity_dir = channel_data_dir / 'transcription_audacity'
+            rttm_files = filter_files_by_stems(
+                rttm_dir, 'rttm', [transcription_dir, transcription_audacity_dir]
+            )
 
+            cfg_id = cfg.channel_name_or_term
+            cfg_name = cfg.name
 
-                    rttm_files = filter_files_by_stems(
-                        rttm_dir, 'rttm', [transcription_dir, transcription_audacity_dir]
-                    )
+            if not rttm_files:
+                self.logger.info(f"No files to transcribe for: {cfg_name} ({cfg_id})")
+                print(f"No files to transcribe for: {cfg_name} ({cfg_id})")
+                continue
 
-                    cfg_id = cfg.channel_name_or_term
-                    cfg_name = cfg.name
+            bar = progress.progress_bar(
+                rttm_files,
+                total=len(rttm_files),
+                desc=f"{cfg_name} ({cfg_id}): Transcribing",
+                unit="file",
+                leave=True,
+                ten_percent_ticks=True,
+            )
 
-                    if not rttm_files:
-                        self.logger.info(f"No files to transcribe for: {cfg_name} ({cfg_id})")
-                        print(f"No files to transcribe for: {cfg_name} ({cfg_id})")
-                        continue
-
-                    bar = progress.progress_bar(
-                        rttm_files,
-                        total=len(rttm_files),
-                        desc=f"{cfg_name} ({cfg_id}): Transcribing",
-                        unit="file",
-                        leave=True,
-                        ten_percent_ticks=True,
-                    )
-
-                    for file in bar:
-                        bar.set_description(f"{cfg_name} ({cfg_id}) Transcribing - {file.name}")
-                        self.process_file(file, cfg)
+            for file in bar:
+                bar.set_description(f"{cfg_name} ({cfg_id}) Transcribing - {file.name}")
+                self.process_file(file, cfg)
 
 
 def main():

@@ -12,8 +12,11 @@ if __name__ == '__main__':
     scripts = [
         root / "src" / "get_youtube.py",
         root / "src" / "get_twitch.py",
+        root / "src" / "get_patreon.py",
         root / "src" / "download_youtube.py",
         root / "src" / "download_twitch.py",
+        root / "src" / "download_patreon.py",
+        root / "src" / "manual_ingest.py",
         root / "src" / "diarize.py",
         root / "src" / "transcribe.py",
         root / "src" / "generate_host_match.py",

@@ -14,7 +14,7 @@ from pathvalidate import sanitize_filename
 from tqdm_sound import TqdmSound
 from yt_dlp import YoutubeDL
 
-from configs import get_global_config, get_configs
+from configs import get_global_config, get_youtube_configs
 from file_utils import csv_to_dict
 from logger import global_logger
 from system_config import max_workers
@@ -415,82 +415,77 @@ def main():
         dynamic_settings_file=str(global_config.project_root / "confs" / "sound.json")
     )
 
-    for channel_config in get_configs():
-        for config_list in vars(channel_config.download_configs).values():
-            if not isinstance(config_list, list) or not config_list:
-                continue
+    for cfg in get_youtube_configs():
+        download_dir = cfg.input_path / "downloads"
+        wav_dir = cfg.output_path / "wav"
 
-            for cfg in config_list:
-                download_dir = cfg.input_path / "downloads"
-                wav_dir = cfg.output_path / "wav"
+        download_dir.mkdir(parents=True, exist_ok=True)
+        wav_dir.mkdir(parents=True, exist_ok=True)
 
-                download_dir.mkdir(parents=True, exist_ok=True)
-                wav_dir.mkdir(parents=True, exist_ok=True)
+        free_bytes = shutil.disk_usage(str(download_dir)).free
+        if free_bytes < global_config.min_free_disk_space_gb * 1024 ** 3:
+            logger.error(f"<{global_config.min_free_disk_space_gb}GB left, aborting downloads")
+            sys.exit(1)
 
-                free_bytes = shutil.disk_usage(str(download_dir)).free
-                if free_bytes < global_config.min_free_disk_space_gb * 1024 ** 3:
-                    logger.error(f"<{global_config.min_free_disk_space_gb}GB left, aborting downloads")
-                    sys.exit(1)
+        (download_dir / 'BACKUP.ignore').touch()
+        (wav_dir / 'BACKUP.ignore').touch()
 
-                (download_dir / 'BACKUP.ignore').touch()
-                (wav_dir / 'BACKUP.ignore').touch()
+        downloaded = (
+            {p.stem for p in download_dir.glob("*.mp4")}
+            | {p.stem for p in download_dir.glob("*.m4a")}
+            | {p.stem for p in download_dir.glob("*.webm")}
+        )
+        wav_files = {p.stem for p in wav_dir.glob("*.wav")}
 
-                downloaded = (
-                    {p.stem for p in download_dir.glob("*.mp4")}
-                    | {p.stem for p in download_dir.glob("*.m4a")}
-                    | {p.stem for p in download_dir.glob("*.webm")}
-                )
-                wav_files = {p.stem for p in wav_dir.glob("*.wav")}
+        metadata = cfg.output_path / 'metadata' / 'metadata_parsed.csv'
+        if not metadata.exists():
+            continue
 
-                metadata = cfg.output_path / 'metadata' / 'metadata_parsed.csv'
-                if not metadata.exists():
-                    continue
+        metadata_records = csv_to_dict(metadata)
+        if not metadata_records:
+            print(f"{cfg.name} ({cfg.channel_name_or_term}): No records to process.")
+            continue
 
-                metadata_records = csv_to_dict(metadata)
-                if not metadata_records:
-                    print(f"{cfg.name} ({cfg.channel_name_or_term}): No records to process.")
-                    continue
+        to_process = [
+            r for r in sorted(metadata_records,
+                              key=lambda r: datetime.fromisoformat(r.get("date_uploaded", "1970-01-01")),
+                              reverse=True)
+            if r['sanitize_title'] not in (downloaded | wav_files)
+        ]
 
-                to_process = [
-                    r for r in sorted(metadata_records,
-                                      key=lambda r: datetime.fromisoformat(r.get("date_uploaded", "1970-01-01")),
-                                      reverse=True)
-                    if r['sanitize_title'] not in (downloaded | wav_files)
-                ]
+        if not to_process:
+            logger.info(f"Nothing to process for {cfg.channel_name_or_term}")
 
-                if not to_process:
-                    logger.info(f"Nothing to process for {cfg.channel_name_or_term}")
+            continue
 
-                    continue
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers(absolute_count=1)) as executor:
+            futures = {
+                executor.submit(download_video, row, cfg, download_dir): row
+                for row in to_process
+            }
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers(absolute_count=1)) as executor:
-                    futures = {
-                        executor.submit(download_video, row, cfg, download_dir): row
-                        for row in to_process
-                    }
+            bar = progress.progress_bar(
+                concurrent.futures.as_completed(futures),
+                total=len(futures),
+                desc=f"{cfg.name} ({cfg.channel_name_or_term}): ",
+                unit="video",
+                leave=True,
+                ten_percent_ticks=True,
+            )
+            for future in bar:
+                row = futures[future]
+                title = row.get('sanitize_title', '<unknown>')
+                bar.set_description(f"{cfg.name} ({cfg.channel_name_or_term}): {title}")
 
-                    bar = progress.progress_bar(
-                        concurrent.futures.as_completed(futures),
-                        total=len(futures),
-                        desc=f"{cfg.name} ({cfg.channel_name_or_term}): ",
-                        unit="video",
-                        leave=True,
-                        ten_percent_ticks=True,
-                    )
-                    for future in bar:
-                        row = futures[future]
-                        title = row.get('sanitize_title', '<unknown>')
-                        bar.set_description(f"{cfg.name} ({cfg.channel_name_or_term}): {title}")
-
-                        try:
-                            future.result()
-                        except Exception as e:
-                            if "rate-limited by YouTube" in str(e):
-                                logger.error("YouTube rate limit reached; sleeping for 80m")
-                                time.sleep(80 * 60)
-                                break
-                            else:
-                                logger.error(f"Error {title}: {e}")
+                try:
+                    future.result()
+                except Exception as e:
+                    if "rate-limited by YouTube" in str(e):
+                        logger.error("YouTube rate limit reached; sleeping for 80m")
+                        time.sleep(80 * 60)
+                        break
+                    else:
+                        logger.error(f"Error {title}: {e}")
 
 
 if __name__ == "__main__":

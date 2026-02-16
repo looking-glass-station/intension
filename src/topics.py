@@ -15,7 +15,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 torch._C._jit_set_profiling_mode(False)
 torch._C._jit_set_profiling_executor(False)
 
-from configs import get_configs, get_global_config
+from configs import get_global_config, iter_processing_configs
 from system_config import device
 from file_utils import filter_files_by_stems, dict_to_csv
 from tqdm_sound import TqdmSound
@@ -134,40 +134,34 @@ def main():
         dynamic_settings_file=str(global_config.project_root / "confs" / "sound.json")
     )
 
-    for channel_cfg in get_configs():
-        for config_list in vars(channel_cfg.download_configs).values():
-            if not isinstance(config_list, list) or not config_list:
+    for cfg in iter_processing_configs(include_manual=True):
+        topics_path = cfg.output_path / 'topics'
+        labeled_path = cfg.output_path / 'transcription_labeled'
+        topics_path.mkdir(exist_ok=True, parents=True)
+
+        transcript_files = filter_files_by_stems(labeled_path, 'csv',
+                                                 [topics_path, labeled_path])
+
+        bar = progress.progress_bar(
+            transcript_files,
+            desc=f"{cfg.name} ({cfg.channel_name_or_term}): Extracting Entities",
+            unit="file",
+            leave=True,
+            ten_percent_ticks=True
+        )
+
+        for file in bar:
+            bar.set_description(f"{cfg.name} ({cfg.channel_name_or_term}) - {file.stem}")
+
+            topics_csv = topics_path / file.name
+
+            if topics_csv.exists():
                 continue
 
-            for cfg in config_list:
+            subjects = get_transcript_subjects(file, ner_pipeline)
+            dict_to_csv(topics_csv, subjects)
 
-                topics_path = cfg.output_path / 'topics'
-                labeled_path = cfg.output_path / 'transcription_labeled'
-                topics_path.mkdir(exist_ok=True, parents=True)
-
-                transcript_files = filter_files_by_stems(labeled_path, 'csv',
-                                                         [topics_path, labeled_path])
-
-                bar = progress.progress_bar(
-                    transcript_files,
-                    desc=f"{cfg.name} ({cfg.channel_name_or_term}): Extracting Entities",
-                    unit="file",
-                    leave=True,
-                    ten_percent_ticks=True
-                )
-
-                for file in bar:
-                    bar.set_description(f"{cfg.name} ({cfg.channel_name_or_term}) - {file.stem}")
-
-                    topics_csv = topics_path / file.name
-
-                    if topics_csv.exists():
-                        continue
-
-                    subjects = get_transcript_subjects(file, ner_pipeline)
-                    dict_to_csv(topics_csv, subjects)
-
-                    logger.info(f"{cfg.name} ({cfg.channel_name_or_term}) - {file.stem}")
+            logger.info(f"{cfg.name} ({cfg.channel_name_or_term}) - {file.stem}")
 
 
 if __name__ == "__main__":
