@@ -187,9 +187,72 @@ class TwitchConfig:
 
 
 @dataclass
+class ManualConfig:
+    """
+    Represents a manual ingest source for a channel (data/<name>/manual).
+    """
+    name: str
+    channel_name_or_term: str
+    hosts: List[str]
+    no_transcript: bool = False
+    input_path: Optional[Path] = None
+    output_path: Optional[Path] = None
+    host_embeddings: List[HostEmbedding] = field(default_factory=list)
+
+    def get_metadata_by_filename(self, sanitize_title: str) -> Optional[Dict[str, Any]]:
+        return None
+
+
+@dataclass_json
+@dataclass
+class PatreonConfig:
+    channel_name_or_term: str
+    overwrite: bool
+    get_static_videos: bool
+    audio_only: bool
+    max_date: Optional[str]
+    min_length_mins: int
+    guest_searches: List[GuestSearch]
+    episode_prefix: Optional[str]
+    guest_replace: List[str]
+    must_contain: List[str]
+    must_exclude: List[str]
+    hosts: List[str]
+    no_transcript: bool = False
+    url: Optional[str] = None
+    campaign_id: Optional[str] = None
+
+    # Computed, not serialized
+    host_embeddings: List[HostEmbedding] = field(
+        default_factory=list,
+        init=False,
+        metadata=config(exclude=lambda _: True, mm_field=ma_fields.Raw())
+    )
+    name: Optional[str] = field(
+        default=None,
+        init=False,
+        metadata=config(exclude=lambda _: True, mm_field=ma_fields.Raw())
+    )
+    input_path: Optional[Path] = field(
+        default=None,
+        init=False,
+        metadata=config(exclude=lambda _: True, mm_field=ma_fields.Raw())
+    )
+    output_path: Optional[Path] = field(
+        default=None,
+        init=False,
+        metadata=config(exclude=lambda _: True, mm_field=ma_fields.Raw())
+    )
+
+    def get_metadata_by_filename(self, sanitize_title: str) -> Optional[Dict[str, Any]]:
+        return None
+
+
+@dataclass
 class DownloadConfigs:
     youtube: List[YouTubeConfig]
     twitch: List[TwitchConfig] = field(default_factory=list)
+    patreon: List[PatreonConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -231,6 +294,7 @@ class GlobalConfig:
     project_root: Path
     diarization_backend: Optional[str] = None
     diarization_backend_nemo: bool = False
+    patreon_cookie: str = ""
 
 
 def get_global_config() -> GlobalConfig:
@@ -269,6 +333,10 @@ def get_global_config() -> GlobalConfig:
 
     google_token = (config_root / 'tokens' / 'google').read_text().strip()
     hf_token = (config_root / 'tokens' / 'huggingface').read_text().strip()
+    patreon_cookie = ""
+    patreon_cookie_path = config_root / 'tokens' / 'patreon'
+    if patreon_cookie_path.exists():
+        patreon_cookie = patreon_cookie_path.read_text(encoding='utf-8').strip()
     # Propagate HF token to env for libraries (e.g., pyannote) that read from HF_TOKEN/HUGGINGFACE_TOKEN.
     if hf_token:
         os.environ.setdefault("HF_TOKEN", hf_token)
@@ -296,10 +364,32 @@ def get_global_config() -> GlobalConfig:
         project_root=config_root,
         diarization_backend=backend_normalized,
         diarization_backend_nemo=backend_nemo_flag,
+        patreon_cookie=patreon_cookie,
     )
 
 
 _configs: Dict[str, ChannelConfig] = {}
+
+
+def _build_host_embeddings(base: Path, hosts: List[str]) -> List[HostEmbedding]:
+    training_folder = base / 'training'
+    embeddings_list: List[HostEmbedding] = []
+    for idx, _host in enumerate(hosts):
+        emb_file = training_folder / f'embeddings_speaker_{idx}.npy'
+        label_file = training_folder / f'embeddings_speaker_label_{idx}.txt'
+        label_text = ''
+        if label_file.exists():
+            try:
+                label_text = label_file.read_text(encoding='utf-8').strip()
+            except Exception:
+                label_text = ''
+
+        if not label_text:
+            label_text = 'Unknown'
+
+        embeddings_list.append(HostEmbedding(embeddings_file=emb_file, label=label_text))
+
+    return embeddings_list
 
 
 def get_configs() -> List[ChannelConfig]:
@@ -328,8 +418,10 @@ def get_configs() -> List[ChannelConfig]:
 
         youtube_items = raw.get('youtube', [])
         twitch_items = raw.get('twitch', [])
+        patreon_items = raw.get('patreon', [])
         youtube_configs: List[YouTubeConfig] = []
         twitch_configs: List[TwitchConfig] = []
+        patreon_configs: List[PatreonConfig] = []
 
         for item in youtube_items:
             yt_cfg = YouTubeConfig.schema().load(item)
@@ -338,25 +430,7 @@ def get_configs() -> List[ChannelConfig]:
             base.mkdir(parents=True, exist_ok=True)
             yt_cfg.input_path = base
             yt_cfg.output_path = base
-
-            training_folder = base / 'training'
-            embeddings_list: List[HostEmbedding] = []
-            for idx, _host in enumerate(yt_cfg.hosts):
-                emb_file = training_folder / f'embeddings_speaker_{idx}.npy'
-                label_file = training_folder / f'embeddings_speaker_label_{idx}.txt'
-                label_text = ''
-                if label_file.exists():
-                    try:
-                        label_text = label_file.read_text(encoding='utf-8').strip()
-                    except Exception:
-                        label_text = ''
-
-                if not label_text:
-                    label_text = 'Unknown'
-
-                embeddings_list.append(HostEmbedding(embeddings_file=emb_file, label=label_text))
-
-            yt_cfg.host_embeddings = embeddings_list
+            yt_cfg.host_embeddings = _build_host_embeddings(base, yt_cfg.hosts)
             youtube_configs.append(yt_cfg)
 
         for t_dict in twitch_items:
@@ -366,30 +440,25 @@ def get_configs() -> List[ChannelConfig]:
             base.mkdir(parents=True, exist_ok=True)
             tw_cfg.input_path = base
             tw_cfg.output_path = base
-
-            training_folder = base / 'training'
-            embeddings_list: List[HostEmbedding] = []
-            for idx, _host in enumerate(tw_cfg.hosts):
-                emb_file = training_folder / f'embeddings_speaker_{idx}.npy'
-                label_file = training_folder / f'embeddings_speaker_label_{idx}.txt'
-                label_text = ''
-
-                if label_file.exists():
-                    try:
-                        label_text = label_file.read_text(encoding='utf-8').strip()
-                    except Exception:
-                        label_text = ''
-
-                if not label_text:
-                    label_text = 'Unknown'
-
-                embeddings_list.append(HostEmbedding(embeddings_file=emb_file, label=label_text))
-
-            tw_cfg.host_embeddings = embeddings_list
+            tw_cfg.host_embeddings = _build_host_embeddings(base, tw_cfg.hosts)
             twitch_configs.append(tw_cfg)
 
+        for p_dict in patreon_items:
+            pt_cfg = PatreonConfig.schema().load(p_dict)
+            pt_cfg.name = name
+            base = gc.data_directory / name / 'patreon' / pt_cfg.channel_name_or_term
+            base.mkdir(parents=True, exist_ok=True)
+            pt_cfg.input_path = base
+            pt_cfg.output_path = base
+            pt_cfg.host_embeddings = _build_host_embeddings(base, pt_cfg.hosts)
+            patreon_configs.append(pt_cfg)
+
         _configs[name] = ChannelConfig(name=name,
-                                       download_configs=DownloadConfigs(youtube=youtube_configs, twitch=twitch_configs))
+                                       download_configs=DownloadConfigs(
+                                           youtube=youtube_configs,
+                                           twitch=twitch_configs,
+                                           patreon=patreon_configs,
+                                       ))
 
     return list(_configs.values())
 
@@ -421,3 +490,64 @@ def get_twitch_configs() -> List[TwitchConfig]:
     Flatten and return all TwitchConfig instances from all channel configurations.
     """
     return [tw for c in get_configs() for tw in c.download_configs.twitch]
+
+
+def get_patreon_configs() -> List[PatreonConfig]:
+    """
+    Flatten and return all PatreonConfig instances from all channel configurations.
+    """
+    return [pt for c in get_configs() for pt in c.download_configs.patreon]
+
+
+def get_manual_configs() -> List[ManualConfig]:
+    """
+    Build ManualConfig entries for each channel, mapping to data/<name>/manual.
+    Hosts are inherited from the first YouTube config if present, otherwise the first Twitch config.
+    """
+    gc = get_global_config()
+    manual_configs: List[ManualConfig] = []
+
+    for channel_cfg in get_configs():
+        hosts: List[str] = []
+        no_transcript = False
+
+        if channel_cfg.download_configs.youtube:
+            src_cfg = channel_cfg.download_configs.youtube[0]
+            hosts = list(src_cfg.hosts or [])
+            no_transcript = getattr(src_cfg, "no_transcript", False)
+        elif channel_cfg.download_configs.twitch:
+            src_cfg = channel_cfg.download_configs.twitch[0]
+            hosts = list(src_cfg.hosts or [])
+            no_transcript = getattr(src_cfg, "no_transcript", False)
+
+        base = gc.data_directory / channel_cfg.name / 'manual'
+        base.mkdir(parents=True, exist_ok=True)
+
+        manual_cfg = ManualConfig(
+            name=channel_cfg.name,
+            channel_name_or_term="manual",
+            hosts=hosts,
+            no_transcript=no_transcript,
+            input_path=base,
+            output_path=base,
+        )
+        manual_cfg.host_embeddings = _build_host_embeddings(base, hosts)
+        manual_configs.append(manual_cfg)
+
+    return manual_configs
+
+
+def iter_processing_configs(include_manual: bool = False):
+    """
+    Yield configs used by downstream processing steps.
+    """
+    for channel_cfg in get_configs():
+        for config_list in vars(channel_cfg.download_configs).values():
+            if not isinstance(config_list, list) or not config_list:
+                continue
+            for cfg in config_list:
+                yield cfg
+
+    if include_manual:
+        for cfg in get_manual_configs():
+            yield cfg

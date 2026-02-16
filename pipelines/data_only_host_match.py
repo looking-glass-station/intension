@@ -11,7 +11,9 @@ if __name__ == '__main__':
     root = Path(__file__).parent.parent
     scripts = [
         root / "src" / "get_youtube.py",
+        root / "src" / "get_patreon.py",
         root / "src" / "download_youtube.py",
+        root / "src" / "download_patreon.py",
         root / "src" / "diarize.py",
         root / "src" / "generate_host_match.py",
         root / "src" / "label_speakers.py",

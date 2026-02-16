@@ -6,7 +6,7 @@ from tqdm_sound import TqdmSound
 from transformers import pipeline
 
 import file_utils
-from configs import get_global_config, get_configs
+from configs import get_global_config, iter_processing_configs
 from file_utils import filter_files_by_stems
 from logger import global_logger
 from system_config import device
@@ -152,55 +152,50 @@ def main():
 
     topics = precompute_topics_with_plurals()
 
-    for channel_cfg in get_configs():
-        for config_list in vars(channel_cfg.download_configs).values():
-            if not isinstance(config_list, list) or not config_list:
+    for cfg in iter_processing_configs(include_manual=True):
+        channel_data_dir = cfg.output_path
+        transcripts_dir = channel_data_dir / "transcription_labeled"
+        bias_dir = channel_data_dir / "bias"
+        audacity_dir = channel_data_dir / "bias_audacity"
+
+        if not transcripts_dir.exists():
+            logger.info(f"No transcripts for: {cfg.name} ({cfg.channel_name_or_term})")
+            continue
+
+        transcript_files = filter_files_by_stems(transcripts_dir, 'csv',
+                                                 [bias_dir, audacity_dir])
+
+        if not transcript_files:
+            logger.info("No transcript files")
+            continue
+
+        bias_dir.mkdir(parents=True, exist_ok=True)
+        audacity_dir.mkdir(parents=True, exist_ok=True)
+
+        # Wrap outer loop in progress bar for per-file progress and richer description
+        file_bar = progress.progress_bar(
+            transcript_files,
+            desc=f"{cfg.name} ({cfg.channel_name_or_term}) - Bias files",
+            unit="file",
+            total=len(transcript_files),
+            leave=True,
+            ten_percent_ticks=True,
+        )
+
+        for transcript_file in file_bar:
+            file_bar.set_description(
+                f"{cfg.name} ({cfg.channel_name_or_term}) - {transcript_file.stem}"
+            )
+
+            stem = transcript_file.stem
+            bias_file = bias_dir / f"{stem}.csv"
+            bias_labels_file = audacity_dir / f"{stem}.txt"
+
+            if bias_file.exists() and bias_labels_file.exists():
                 continue
 
-            for cfg in config_list:
-                channel_data_dir = cfg.output_path
-                transcripts_dir = channel_data_dir / "transcription_labeled"
-                bias_dir = channel_data_dir / "bias"
-                audacity_dir = channel_data_dir / "bias_audacity"
-
-                if not transcripts_dir.exists():
-                    logger.info(f"No transcripts for: {cfg.name} ({cfg.channel_name_or_term})")
-                    continue
-
-                transcript_files = filter_files_by_stems(transcripts_dir, 'csv',
-                                                         [bias_dir, audacity_dir])
-
-                if not transcript_files:
-                    logger.info("No transcript files")
-                    continue
-
-                bias_dir.mkdir(parents=True, exist_ok=True)
-                audacity_dir.mkdir(parents=True, exist_ok=True)
-
-                # Wrap outer loop in progress bar for per-file progress and richer description
-                file_bar = progress.progress_bar(
-                    transcript_files,
-                    desc=f"{cfg.name} ({cfg.channel_name_or_term}) - Bias files",
-                    unit="file",
-                    total=len(transcript_files),
-                    leave=True,
-                    ten_percent_ticks=True,
-                )
-
-                for transcript_file in file_bar:
-                    file_bar.set_description(
-                        f"{cfg.name} ({cfg.channel_name_or_term}) - {transcript_file.stem}"
-                    )
-
-                    stem = transcript_file.stem
-                    bias_file = bias_dir / f"{stem}.csv"
-                    bias_labels_file = audacity_dir / f"{stem}.txt"
-
-                    if bias_file.exists() and bias_labels_file.exists():
-                        continue
-
-                    logger.info(f"Processing {transcript_file} for bias...")
-                    classify_bias_for_transcripts(transcript_file, bias_file, bias_labels_file, topics, classifier)
+            logger.info(f"Processing {transcript_file} for bias...")
+            classify_bias_for_transcripts(transcript_file, bias_file, bias_labels_file, topics, classifier)
 
     logger.info("Bias classification completed.")
 

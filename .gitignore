@@ -8,4 +8,18 @@
 /tokens/google
 /tokens/huggingface
 /confs/download_configurations_/
+/confs/patreon_cookie.txt
 
+/logs/*
+/powerbi/
+__pycache__
+
+/.idea/
+/logs/
+confs/patreon_cookie.txt
+tokens/patreon
+
+/.*/*
+backup_project.ps1
+src/test.py
+*.log

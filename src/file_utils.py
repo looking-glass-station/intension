@@ -67,6 +67,22 @@ def get_audio_files(input_dir: Path) -> List[Path]:
     return [f for pattern in formats for f in input_dir.glob(pattern)]
 
 
+def get_media_files_recursive(input_dir: Path) -> List[Path]:
+    """
+    Returns list of audio/video files under input_dir (recursive).
+    """
+    if not input_dir.exists():
+        return []
+    exts = {
+        ".m4a", ".mp3", ".wav", ".flac", ".ogg", ".opus",
+        ".mp4", ".mkv", ".webm", ".mov", ".avi",
+    }
+    return [
+        p for p in input_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in exts
+    ]
+
+
 def parse_rttm(rttm_file: Path) -> List[Dict[str, Any]]:
     """
     Parse RTTM file and extract per-speaker segments.

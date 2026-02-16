@@ -1,15 +1,20 @@
+--extra-index-url https://download.pytorch.org/whl/cu118
 torch==2.5.1+cu118
 torchaudio==2.5.1+cu118
---extra-index-url https://download.pytorch.org/whl/cu118
 
 whisperx<3.5
-pyannote.audio
+setuptools<71
+packaging==25.0
+huggingface_hub==0.19.4
+pyannote.audio==3.1.1
 transformers
+faster-whisper
 numpy==1.26.4
 pandas
 librosa
 soundfile
 resemblyzer
+tqdm
 tqdm-sound
 ffmpeg-python
 pillow
@@ -24,3 +29,10 @@ scrapetube
 yt-dlp
 yt-dlp-ejs
 twitch-dl
+aiohttp
+browser-cookie3
+patreon-dl
+yarl
+omegaconf
+detoxify
+spacy
