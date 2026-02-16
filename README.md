@@ -11,6 +11,8 @@ It uses a collection of preexisting tools including:
 * pyannote.audio
 * yt_dlp
 * Twitch-dl
+* Patreon
+* Manual files in a directory
 
 ## Installation
 Install pytorch separately first, I find it heads off dependency issues
