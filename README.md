@@ -40,7 +40,7 @@ For:
 * pyannote/segmentation-3.0
 * pyannote/speaker-diarization-3.1
 
- ## Transcirption:
+ ## Transcription:
  * Measured median transcription pipeline is 56.7x realtime:
  * About 16% faster than normal faster-whisper implementations
  * About 39% faster than large-v3-turbo
