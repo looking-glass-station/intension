@@ -1,9 +1,12 @@
 import logging
+import os
 import warnings
 from pathlib import Path
-from typing import Union, Any
+from typing import Union, Any, Optional, List
 
-from faster_whisper import WhisperModel
+import numpy as np
+import soundfile as sf
+from faster_whisper import WhisperModel, BatchedInferencePipeline
 from tqdm_sound import TqdmSound
 
 from configs import get_global_config, iter_processing_configs
@@ -15,6 +18,10 @@ from system_config import is_cuda
 class Transcriber:
     """
     Handles ASR transcription for WAV+RTTM pairs, manages model and processor.
+
+    NOTE:
+    Downstream consumers should use `transcription/` and `transcription_labeled/` as canonical text sources.
+    RTTM boundaries can diverge over time from transcript row boundaries.
     """
 
     MODEL_ID = "Systran/faster-distil-whisper-large-v3"
@@ -23,7 +30,14 @@ class Transcriber:
         self._init_libs()
         self.logger = global_logger("transcription")
         self.global_config = get_global_config()
+        self.transcribe_beam_size = self._env_int("INTENSION_TRANSCRIBE_BEAM_SIZE", 1)
+        self.transcribe_best_of = self._env_int("INTENSION_TRANSCRIBE_BEST_OF", 1)
+        self.transcribe_batch_size = self._env_int("INTENSION_TRANSCRIBE_BATCH_SIZE", 16) # depends on your vram size, not much benefit past 16 for most cases
+        self.use_batched_transcribe = self._env_bool("INTENSION_TRANSCRIBE_BATCHED", True) 
         self.model = self._load_model()
+        self.batched_model = (
+            BatchedInferencePipeline(model=self.model) if self.use_batched_transcribe else None
+        )
 
     def _init_libs(self):
         """
@@ -36,9 +50,39 @@ class Transcriber:
             category=FutureWarning,
         )
 
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        value = value.strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            parsed = int(raw)
+        except ValueError:
+            return default
+        return max(1, parsed)
+
     def _load_model(self):
-        compute_type = "float16" if is_cuda else "float32"
-        device = "cuda" if is_cuda else "cpu"
+        force_cpu = os.environ.get("INTENSION_FORCE_CPU", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        safe_gpu_mode = os.environ.get("INTENSION_GPU_SAFE_MODE", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        use_cuda = is_cuda and not force_cpu
+        compute_type = "int8_float16" if (use_cuda and safe_gpu_mode) else ("float16" if use_cuda else "float32")
+        device = "cuda" if use_cuda else "cpu"
         return WhisperModel(
             self.MODEL_ID,
             device=device,
@@ -69,17 +113,93 @@ class Transcriber:
 
         return url
 
+    def _transcribe_single_segment(self, segment_audio: np.ndarray) -> str:
+        result_segments, _ = self.model.transcribe(
+            segment_audio,
+            language="en",
+            vad_filter=False,
+            without_timestamps=True,
+            beam_size=self.transcribe_beam_size,
+            best_of=self.transcribe_best_of,
+            temperature=0.0,
+            condition_on_previous_text=False,
+        )
+        return " ".join(s.text.strip() for s in result_segments).strip()
+
+    def _transcribe_batch_from_clips(
+            self,
+            audio_data: np.ndarray,
+            sample_rate: int,
+            segment_batch: List[dict],
+    ) -> List[str]:
+        if self.batched_model is None:
+            raise RuntimeError("Batched transcription is disabled.")
+
+        clip_timestamps = []
+        for seg in segment_batch:
+            start_sample = int(seg.get("start_time") * sample_rate)
+            end_sample = int(seg.get("end_time") * sample_rate)
+            if end_sample <= start_sample:
+                end_sample = start_sample + 1
+            clip_timestamps.append({"start": start_sample, "end": end_sample})
+
+        result_segments, _ = self.batched_model.transcribe(
+            audio_data,
+            language="en",
+            vad_filter=False,
+            without_timestamps=True,
+            clip_timestamps=clip_timestamps,
+            batch_size=self.transcribe_batch_size,
+            beam_size=self.transcribe_beam_size,
+            best_of=self.transcribe_best_of,
+            temperature=0.0,
+            condition_on_previous_text=False,
+        )
+        decoded = [s.text.strip() for s in result_segments]
+        if len(decoded) != len(segment_batch):
+            raise RuntimeError(
+                f"Batch decode mismatch: expected {len(segment_batch)} segments, got {len(decoded)}."
+            )
+        return decoded
+
+    @staticmethod
+    def _merge_adjacent_same_speaker_rows(transcript_rows: List[dict]) -> List[dict]:
+        if len(transcript_rows) < 2:
+            return transcript_rows
+
+        merged_rows = [dict(transcript_rows[0])]
+        for current in transcript_rows[1:]:
+            previous = merged_rows[-1]
+            if current.get("speaker") == previous.get("speaker"):
+                previous_text = (previous.get("text") or "").strip()
+                current_text = (current.get("text") or "").strip()
+                previous["text"] = f"{previous_text} {current_text}".strip()
+                previous["end_time"] = current.get("end_time")
+                previous["duration"] = previous.get("end_time") - previous.get("start_time")
+                continue
+
+            merged_rows.append(dict(current))
+
+        return merged_rows
+
     def segment_and_transcribe(
             self,
             rttm_file: Path,
             wav_file: Path,
             transcript_file: Path,
             audacity_file: Path,
-            cfg: Any = None
+            cfg: Any = None,
+            progress: Optional[Any] = None,
+            segment_desc: Optional[str] = None,
     ) -> None:
         """
         Perform ASR on segments defined in an RTTM file and write transcript CSV and Audacity label file.
+
+        NOTE:
+        This step materializes the canonical transcript rows in `transcription/`.
+        Do not assume RTTM rows remain a stable 1:1 pairing with transcript rows later.
         """
+        pair_existed_at_start = transcript_file.exists() and audacity_file.exists()
         segments = parse_rttm(rttm_file)
         if not segments:
             self.logger.info(f"No segments found in RTTM: {rttm_file}")
@@ -87,42 +207,123 @@ class Transcriber:
             audacity_file.write_text("", encoding="utf-8")
             return
 
-        transcript_rows = []
-        audacity_rows = []
-        filename = wav_file.stem
-
+        valid_segments = []
         for seg in segments:
             start = seg.get("start_time")
             end = seg.get("end_time")
             if (end - start) < 0.5:
                 continue
+            valid_segments.append(seg)
 
-            result_segments, _ = self.model.transcribe(
-                str(wav_file),
-                language="en",
-                clip_timestamps=f"{start},{end}",
-                vad_filter=False,
-                without_timestamps=True,
-            )
-            text = " ".join(s.text.strip() for s in result_segments).strip()
+        transcript_rows = []
+        filename = wav_file.stem
 
-            url = ''
-            if cfg is not None:
-                url = self.make_url(cfg, filename, start)
+        # Load audio once into memory to avoid re-opening the file per segment
+        audio_data, sample_rate = sf.read(wav_file, dtype="float32")
+        if audio_data.ndim > 1:
+            audio_data = audio_data.mean(axis=1)
+        if sample_rate != 16000:
+            import librosa
+            audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
+            sample_rate = 16000
 
-            transcript_rows.append({
-                "speaker": seg.get("speaker"),
-                "start_time": start,
-                "end_time": end,
-                "duration": end - start,
-                "text": text,
-                "timestamp_url": url
-            })
-            audacity_rows.append({
-                "start_time": start,
-                "end_time": end,
-                "text": text,
-            })
+        if self.batched_model is None:
+            segment_iter = valid_segments
+            if progress is not None and valid_segments:
+                segment_iter = progress.progress_bar(
+                    valid_segments,
+                    total=len(valid_segments),
+                    desc=segment_desc or f"Segments - {filename}",
+                    unit="segment",
+                    leave=False,
+                    ten_percent_ticks=True,
+                )
+            for seg in segment_iter:
+                start = seg.get("start_time")
+                end = seg.get("end_time")
+
+                start_sample = int(start * sample_rate)
+                end_sample = int(end * sample_rate)
+                segment_audio = audio_data[start_sample:end_sample]
+                text = self._transcribe_single_segment(segment_audio)
+
+                url = ''
+                if cfg is not None:
+                    url = self.make_url(cfg, filename, start)
+
+                transcript_rows.append({
+                    "speaker": seg.get("speaker"),
+                    "start_time": start,
+                    "end_time": end,
+                    "duration": end - start,
+                    "text": text,
+                    "timestamp_url": url
+                })
+        else:
+            batch_offsets = range(0, len(valid_segments), self.transcribe_batch_size)
+            batch_iter = batch_offsets
+            if progress is not None and valid_segments:
+                total_batches = len(batch_offsets)
+                batch_iter = progress.progress_bar(
+                    batch_offsets,
+                    total=total_batches,
+                    desc=f"{segment_desc or f'Segments - {filename}'} (batched)",
+                    unit="batch",
+                    leave=False,
+                    ten_percent_ticks=True,
+                )
+
+            for i in batch_iter:
+                segment_batch = valid_segments[i:i + self.transcribe_batch_size]
+                try:
+                    batch_texts = self._transcribe_batch_from_clips(audio_data, sample_rate, segment_batch)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Batched decode failed for {filename} [{i}:{i + len(segment_batch)}], "
+                        f"falling back to per-segment decode: {e}"
+                    )
+                    batch_texts = []
+                    for seg in segment_batch:
+                        start_sample = int(seg.get("start_time") * sample_rate)
+                        end_sample = int(seg.get("end_time") * sample_rate)
+                        segment_audio = audio_data[start_sample:end_sample]
+                        batch_texts.append(self._transcribe_single_segment(segment_audio))
+
+                for seg, text in zip(segment_batch, batch_texts):
+                    start = seg.get("start_time")
+                    end = seg.get("end_time")
+
+                    url = ''
+                    if cfg is not None:
+                        url = self.make_url(cfg, filename, start)
+
+                    transcript_rows.append({
+                        "speaker": seg.get("speaker"),
+                        "start_time": start,
+                        "end_time": end,
+                        "duration": end - start,
+                        "text": text,
+                        "timestamp_url": url
+                    })
+
+        if not pair_existed_at_start:
+            original_count = len(transcript_rows)
+            transcript_rows = self._merge_adjacent_same_speaker_rows(transcript_rows)
+            merged_count = len(transcript_rows)
+            if merged_count < original_count:
+                self.logger.info(
+                    f"Merged adjacent same-speaker transcript rows for {filename}: "
+                    f"{original_count} -> {merged_count}"
+                )
+
+        audacity_rows = [
+            {
+                "start_time": row.get("start_time"),
+                "end_time": row.get("end_time"),
+                "text": row.get("text", ""),
+            }
+            for row in transcript_rows
+        ]
 
         dict_to_csv(transcript_file, transcript_rows)
         audacity_writer(audacity_file, audacity_rows)
@@ -148,7 +349,7 @@ class Transcriber:
 
         self.segment_and_transcribe(rttm_file, wav_file, transcript_file, audacity_file)
 
-    def process_file(self, file: Path, cfg: Any) -> str:
+    def process_file(self, file: Path, cfg: Any, progress: Optional[Any] = None) -> str:
         """
         Transcribe a single WAV file given its RTTM segment file.
         """
@@ -173,7 +374,16 @@ class Transcriber:
         cfg_name = cfg.name
 
         try:
-            self.segment_and_transcribe(rttm_file, wav_file, transcript_file, audacity_file, cfg)
+            segment_desc = f"{cfg_name} ({cfg_id}) Segments - {file.stem}"
+            self.segment_and_transcribe(
+                rttm_file,
+                wav_file,
+                transcript_file,
+                audacity_file,
+                cfg,
+                progress=progress,
+                segment_desc=segment_desc,
+            )
             self.logger.info(f"Transcribed: {file.name}")
             return f"Processed: {cfg_name} ({cfg_id}) - {file.name}"
 
@@ -227,7 +437,7 @@ class Transcriber:
 
             for file in bar:
                 bar.set_description(f"{cfg_name} ({cfg_id}) Transcribing - {file.name}")
-                self.process_file(file, cfg)
+                self.process_file(file, cfg, progress=progress)
 
 
 def main():

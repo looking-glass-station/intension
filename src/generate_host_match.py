@@ -165,7 +165,8 @@ def main():
         dynamic_settings_file=str(global_config.project_root / "confs" / "sound.json")
     )
 
-    for cfg in iter_processing_configs(include_manual=True):
+    all_configs = list(iter_processing_configs(include_manual=True))
+    for cfg in all_configs:
         wav_dir = cfg.output_path / 'wav'
         rttm_dir = cfg.output_path / 'rttm'
         training_folder = cfg.output_path / 'training'
@@ -202,9 +203,38 @@ def main():
             continue
 
         if available < global_config.host_match.sample_file_count:
-            logger.info(f"Skipping {cfg.channel_name_or_term}: insufficient wav files ({available}).")
-            unsatisfied_configs.append(cfg.channel_name_or_term)
-            continue
+            # Try to find a sibling source (same channel name) with enough WAV/RTTM pairs
+            fallback_found = False
+            for sibling in all_configs:
+                if sibling is cfg:
+                    continue
+                if getattr(sibling, 'name', None) != getattr(cfg, 'name', None):
+                    continue
+                sib_wav_dir = sibling.output_path / 'wav'
+                sib_rttm_dir = sibling.output_path / 'rttm'
+                if not sib_wav_dir.exists() or not sib_rttm_dir.exists():
+                    continue
+                sib_wav_files = [
+                    p for p in sib_wav_dir.glob('*.wav')
+                    if (sib_rttm_dir / f"{p.stem}.rttm").exists()
+                ]
+                if len(sib_wav_files) >= global_config.host_match.sample_file_count:
+                    logger.info(
+                        f"{cfg.channel_name_or_term}: insufficient data ({available} files); "
+                        f"falling back to '{sibling.channel_name_or_term}' ({len(sib_wav_files)} files)."
+                    )
+                    wav_files = sib_wav_files
+                    rttm_dir = sib_rttm_dir
+                    available = len(sib_wav_files)
+                    fallback_found = True
+                    break
+            if not fallback_found:
+                logger.info(
+                    f"Skipping {cfg.channel_name_or_term}: insufficient wav files ({available}) "
+                    f"and no fallback source found."
+                )
+                unsatisfied_configs.append(cfg.channel_name_or_term)
+                continue
 
         # Remove previous training data
         for f in training_folder.iterdir():

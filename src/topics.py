@@ -136,6 +136,7 @@ def main():
 
     for cfg in iter_processing_configs(include_manual=True):
         topics_path = cfg.output_path / 'topics'
+        # Use labeled transcripts as canonical source; RTTM may be out of sync with transcript rows.
         labeled_path = cfg.output_path / 'transcription_labeled'
         topics_path.mkdir(exist_ok=True, parents=True)
 

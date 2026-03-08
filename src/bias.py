@@ -77,6 +77,8 @@ def classify_bias_for_transcripts(
 
     for row in rows:
         text = row["text"]
+        if not isinstance(text, str):
+            continue
         start = float(row["start_time"])
         end = float(row["end_time"])
         duration = end - start
@@ -154,6 +156,7 @@ def main():
 
     for cfg in iter_processing_configs(include_manual=True):
         channel_data_dir = cfg.output_path
+        # Use labeled transcripts as canonical source; RTTM may be out of sync with transcript rows.
         transcripts_dir = channel_data_dir / "transcription_labeled"
         bias_dir = channel_data_dir / "bias"
         audacity_dir = channel_data_dir / "bias_audacity"

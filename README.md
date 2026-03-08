@@ -15,15 +15,37 @@ It uses a collection of preexisting tools including:
 * Manual files in a directory
 
 ## Installation
-Install pytorch separately first, I find it heads off dependency issues
+Use Python 3.10 or 3.11 for this project. Python 3.12 can trigger dependency conflicts
+(notably around `whisperx` / `pyannote` / `av`) and lead to failed builds on Windows. 
 
-`pip3 install torch torchaudio --index-url https://download.pytorch.org/whl/cu118`
+Dependency hell! 
 
-`pip3 install inflect transformers tqdm-sound dataclasses-json marshmallow whisperx numpy pillow yt_dlp pathvalidate pandas soundfile librosa resemblyzer pyannote.audio anyascii dateparser isodate scrapetube google-api-python-client sounddevice ffmpeg-python`
+The project declares this in `pyproject.toml` as:
+`requires-python = ">=3.10,<3.12"`
 
-If you plan on fetching from Twitch, you'll need Ivan Habunek's library twitch-dl:
+Recommended setup (Windows PowerShell):
 
-`pip3 install twitch-dl`
+```powershell
+# from project root
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# upgrade packaging tools first
+python -m pip install --upgrade pip setuptools wheel
+
+# enforce project python compatibility from pyproject.toml
+pip install -e .
+
+# install runtime dependencies
+pip install -r requirements.txt
+```
+
+If you need CUDA 11.8 wheels explicitly, install PyTorch first (this is a good idea, it's very annoying):
+
+```powershell
+pip install torch==2.5.1+cu118 torchaudio==2.5.1+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+pip install -r requirements.txt
+```
 
 ## 🔑 Generate authentication keys
 You will need to generate authentication keys for: 
@@ -161,6 +183,5 @@ Process all:
 
 ## 📋 Compatibility
 Tested on Windows 11\Debian with an AMD CPU and NVIDIA 4070 and on an Intel CPU and NVIDIA 2050.
-
 
 
