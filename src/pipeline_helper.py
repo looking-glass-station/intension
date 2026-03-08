@@ -1,8 +1,22 @@
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import List
 from configs import get_global_config
+
+
+def _get_python_executable() -> str:
+    """
+    Prefer the project-local venv interpreter so all pipeline subprocesses
+    run with the same environment.
+    """
+    project_root = Path(__file__).resolve().parent.parent
+    venv_python = project_root / ".venv" / "Scripts" / "python.exe"
+    if venv_python.exists():
+        return str(venv_python)
+    return sys.executable
+
 
 def run_script(script_path):
     """
@@ -15,7 +29,15 @@ def run_script(script_path):
     print(f"[*] {label.replace('_', ' ').title()}")
 
 
-    result = subprocess.run([sys.executable, str(script_path)])
+    python_exe = _get_python_executable()
+    result = subprocess.run([python_exe, str(script_path)])
+    transcribe_crash_codes = {3221226505, -1073740791}
+    if label == "transcribe" and result.returncode in transcribe_crash_codes:
+        print("transcribe crashed natively (0xC0000409); retrying once on GPU safe mode (int8_float16)")
+        retry_env = os.environ.copy()
+        retry_env["INTENSION_GPU_SAFE_MODE"] = "1"
+        result = subprocess.run([python_exe, str(script_path)], env=retry_env)
+
     if result.returncode != 0:
         print(f"{label} failed with code {result.returncode}")
 

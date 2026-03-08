@@ -1,14 +1,16 @@
+# python 3.10
 --extra-index-url https://download.pytorch.org/whl/cu118
 torch==2.5.1+cu118
 torchaudio==2.5.1+cu118
 
-whisperx<3.5
+whisperx==3.3.1
 setuptools<71
 packaging==25.0
 huggingface_hub==0.19.4
-pyannote.audio==3.1.1
+pyannote.audio==3.3.2
 transformers
-faster-whisper
+faster-whisper==1.1.0
+av==14.0.0
 numpy==1.26.4
 pandas
 librosa

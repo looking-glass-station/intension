@@ -13,10 +13,43 @@ from patreon_dl import api
 logger = global_logger("patreon_utils")
 
 
+AUTH_COOKIE_KEYS = {"session_id", "session_id.sig", "__Secure-next-auth.session-token"}
+
+
+def _extract_cookie_from_brave(domain_name: str = "patreon.com") -> str:
+    try:
+        import browser_cookie3  # type: ignore
+    except Exception:
+        return ""
+
+    try:
+        cookie_jar = browser_cookie3.brave(domain_name=domain_name)
+    except Exception as e:
+        logger.warning(f"PATREON dynamic cookie extraction from Brave failed: {e}")
+        return ""
+
+    cookies: Dict[str, str] = {}
+    for cookie in cookie_jar:
+        if domain_name not in (cookie.domain or ""):
+            continue
+        if not cookie.name or cookie.value is None:
+            continue
+        cookies[cookie.name] = cookie.value
+
+    if not cookies:
+        return ""
+
+    prioritized = [k for k in AUTH_COOKIE_KEYS if k in cookies]
+    rest = sorted([k for k in cookies.keys() if k not in AUTH_COOKIE_KEYS])
+    ordered = prioritized + rest
+    return "; ".join(f"{k}={cookies[k]}" for k in ordered)
+
+
 def get_cookie(global_config) -> str:
-    cookie = os.environ.get("PATREON_COOKIE", "").strip()
-    if cookie:
-        return cookie
+    cookie_sources = []
+    env_cookie = os.environ.get("PATREON_COOKIE", "").strip()
+    if env_cookie:
+        cookie_sources.append(("PATREON_COOKIE env var", env_cookie))
 
     # Optional local file override (keep secrets out of JSON / git history)
     try:
@@ -28,11 +61,34 @@ def get_cookie(global_config) -> str:
                 if txt.lower().startswith("cookie:"):
                     txt = txt.split(":", 1)[1].strip()
                 if txt:
-                    return txt
+                    cookie_sources.append((str(p), txt))
     except Exception:
         pass
 
-    return (global_config.patreon_cookie or "").strip()
+    config_cookie = (global_config.patreon_cookie or "").strip()
+    if config_cookie:
+        cookie_sources.append(("tokens/global config", config_cookie))
+
+    for source_name, cookie in cookie_sources:
+        parsed = parse_cookie_string(cookie)
+        if has_auth_cookie(parsed):
+            return cookie
+        logger.warning(
+            f"PATREON cookie from {source_name} is missing auth keys "
+            "(session_id/session_id.sig/__Secure-next-auth.session-token)."
+        )
+
+    dynamic = _extract_cookie_from_brave("patreon.com")
+    if dynamic:
+        parsed = parse_cookie_string(dynamic)
+        if has_auth_cookie(parsed):
+            logger.info("Using dynamically extracted PATREON cookie from Brave.")
+            return dynamic
+        logger.warning("Dynamically extracted Brave PATREON cookie is missing auth keys.")
+
+    if cookie_sources:
+        return cookie_sources[0][1]
+    return ""
 
 
 def parse_cookie_string(cookie: str) -> Dict[str, str]:
@@ -49,8 +105,7 @@ def parse_cookie_string(cookie: str) -> Dict[str, str]:
 
 def has_auth_cookie(cookie_dict: Dict[str, str]) -> bool:
     # Patreon member access requires an authenticated session cookie, not just Cloudflare cookies.
-    auth_keys = {"session_id", "session_id.sig", "__Secure-next-auth.session-token"}
-    return any(k in cookie_dict for k in auth_keys)
+    return any(k in cookie_dict for k in AUTH_COOKIE_KEYS)
 
 
 def vanity_from_config(cfg) -> str:

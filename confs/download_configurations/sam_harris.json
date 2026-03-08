@@ -1,0 +1,31 @@
+{
+  "youtube": [
+    {
+      "channel_name_or_term": "samharrisorg",
+      "use_google_api": true,
+      "max_date": null,
+      "is_playlist": false,
+      "is_search": false,
+      "min_length_mins": 5,
+      "must_contain": [],
+      "must_exclude": [
+        "(Clip)"
+      ],
+      "hosts": [
+        "Harris"
+      ],
+      "overwrite": false,
+      "get_static_videos": true,
+      "audio_only": true,
+      "guest_searches": [
+        {
+          "separator": "with",
+          "position": "after"
+        }
+      ],
+      "episode_prefix": "#",
+      "guest_replace": [],
+      "no_transcript": true
+    }
+  ]
+}

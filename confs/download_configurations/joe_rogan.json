@@ -1,0 +1,42 @@
+{
+  "youtube": [
+    {
+      "channel_name_or_term": "joerogan",
+      "use_google_api": true,
+      "max_date": null,
+      "is_playlist": false,
+      "is_search": false,
+      "min_length_mins": 30,
+      "must_contain": [
+        "Joe Rogan Experience #"
+      ],
+      "must_exclude": [
+        "MMA",
+        "&",
+        " and ",
+        ", ",
+        "with",
+        "from",
+        "Protect Our Parks",
+        "Sober",
+        "Recap",
+        "from Joe ",
+        "from the Joe "
+      ],
+      "hosts": [
+        "Rogan"
+      ],
+      "overwrite": false,
+      "get_static_videos": true,
+      "audio_only": true,
+      "guest_searches": [
+        {
+          "separator": "-",
+          "position": "after"
+        }
+      ],
+      "episode_prefix": "#",
+      "guest_replace": []
+    }
+  ]
+}

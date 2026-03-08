@@ -1,16 +1,17 @@
 {
-    "youtube": [
+  "youtube": [
     {
-      "channel_name_or_term": "NASA",
+      "channel_name_or_term": "decodingthegurus",
       "use_google_api": true,
       "max_date": null,
-      "is_playlist": true,
+      "is_playlist": false,
       "is_search": false,
       "min_length_mins": 1,
-      "must_contain": ["Cosmic Dawn"],
+      "must_contain": [],
       "must_exclude": [],
       "hosts": [
-        "Brian Lamb"
+        "Matt",
+        "Chris"
       ],
       "overwrite": false,
       "get_static_videos": true,
@@ -19,23 +20,25 @@
       "episode_prefix": null,
       "guest_replace": []
     }
-  ],"twitch": [
+  ],
+  "patreon": [
     {
-      "channel_name_or_term": "nasa",
-      "is_clips": false,
+      "channel_name_or_term": "DecodingTheGurus",
+      "campaign_id": "5301957",
       "max_date": null,
-      "must_contain": ["NASA’s VIPER Moon Rover"],
+      "min_length_mins": 1,
+      "must_contain": [],
       "must_exclude": [],
       "hosts": [
-        "Lara", "Erica", "Anton", "DW Wheeler"
+        "Matt",
+        "Chris"
       ],
-      "overwrite": true,
-      "min_length_mins": 5,
+      "overwrite": false,
       "get_static_videos": true,
       "audio_only": true,
       "guest_searches": [],
       "episode_prefix": null,
       "guest_replace": []
     }
-  ]
+  ]  
 }

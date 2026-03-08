@@ -111,6 +111,13 @@ def find_deno_runtime() -> str:
     return ""
 
 
+def bytes_to_gb(value: int) -> float:
+    """
+    Convert bytes to GB (GiB units).
+    """
+    return value / (1024 ** 3)
+
+
 def is_ejs_error(msg: str) -> bool:
     msg = (msg or "").lower()
     return any(marker in msg for marker in EJS_ERROR_MARKERS)
@@ -423,8 +430,16 @@ def main():
         wav_dir.mkdir(parents=True, exist_ok=True)
 
         free_bytes = shutil.disk_usage(str(download_dir)).free
-        if free_bytes < global_config.min_free_disk_space_gb * 1024 ** 3:
-            logger.error(f"<{global_config.min_free_disk_space_gb}GB left, aborting downloads")
+        free_gb = bytes_to_gb(free_bytes)
+        min_gb = float(global_config.min_free_disk_space_gb)
+        if free_gb < min_gb:
+            msg = (
+                f"Insufficient disk space for downloads at {download_dir}. "
+                f"Free: {free_gb:.2f} GB, required minimum: {min_gb:.2f} GB. "
+                "Lower confs/global.json:min_free_disk_space_gb or free disk space."
+            )
+            logger.error(msg)
+            print(msg, file=sys.stderr)
             sys.exit(1)
 
         (download_dir / 'BACKUP.ignore').touch()

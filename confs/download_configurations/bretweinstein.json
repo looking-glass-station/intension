@@ -1,16 +1,17 @@
 {
   "youtube": [
     {
-      "channel_name_or_term": "DemocracyNow",
+      "channel_name_or_term": "DarkHorsePod",
       "use_google_api": true,
-      "max_date": "2025-01-01",
+      "max_date": null,
       "is_playlist": false,
       "is_search": false,
-      "min_length_mins": 1,
-      "must_contain": ["world headlines"],
+      "min_length_mins": 5,
+      "must_contain": [],
       "must_exclude": [],
       "hosts": [
-        "Amy Goodman"
+        "Bret", 
+        "Heather"
       ],
       "overwrite": false,
       "get_static_videos": true,

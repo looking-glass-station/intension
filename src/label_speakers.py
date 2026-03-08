@@ -26,6 +26,8 @@ def label_speakers(
         encoder: VoiceEncoder,
         host_embeddings: List[HostEmbedding]
 ):
+    # Use transcript rows as the source of truth for text/timing.
+    # RTTM files may not stay perfectly aligned with transcript rows over time.
     known_embeddings = [np.load(e.embeddings_file) for e in host_embeddings]
     known_labels = [e.label for e in host_embeddings]
 
@@ -130,7 +132,7 @@ def main():
                         lines.append(f"0.000000\t0.010000\t{speaker_tag} {host}\n")
                     label_path.write_text("".join(lines), encoding="utf-8")
                     logger.info(f"Wrote host mapping labels for {wav_file.stem}")
-            continue
+            # Fall through to transcript labeling if transcripts and embeddings exist.
 
         if not training_folder.exists():
             continue
@@ -140,6 +142,7 @@ def main():
             logger.info(f"No files to label for: {cfg.name} ({cfg.channel_name_or_term}) - no embeddings")
             continue
 
+        # Canonical text/timing inputs are in `transcription/`; do not join against RTTM rows here.
         transcript_folder = data_out / 'transcription'
         labeled_folder = data_out / 'transcription_labeled'
         audacity_folder = data_out / 'transcription_labeled_audacity'
