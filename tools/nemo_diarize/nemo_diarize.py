@@ -33,15 +33,33 @@ from pathlib import Path
 
 import soundfile as sf
 
-MODELS = {
-    "sortformer-offline": "nvidia/diar_sortformer_4spk-v1",
-    "sortformer-streaming": "nvidia/diar_streaming_sortformer_4spk-v2.1",
+HERE = Path(__file__).resolve().parent
+CONF_DIR = HERE / "conf"
+MODEL_DIR = HERE / "models"  # local .nemo checkpoints (gitignored; downloads are flaky here)
+
+MODELS = {  # mode -> (hf repo id, local .nemo filename)
+    "sortformer-offline": ("nvidia/diar_sortformer_4spk-v1", "diar_sortformer_4spk-v1.nemo"),
+    "sortformer-streaming": ("nvidia/diar_streaming_sortformer_4spk-v2.1",
+                             "diar_streaming_sortformer_4spk-v2.1.nemo"),
 }
 CLUSTER_CONF = {
     "clustering-general": "diar_infer_general.yaml",
     "clustering-meeting": "diar_infer_meeting.yaml",
 }
-CONF_DIR = Path(__file__).resolve().parent / "conf"
+# local .nemo for the ClusteringDiarizer sub-models, if present
+VAD_NEMO = MODEL_DIR / "vad_multilingual_marblenet.nemo"
+SPK_NEMO = MODEL_DIR / "titanet-l.nemo"
+
+
+def load_sortformer(mode: str):
+    """Prefer a local .nemo; fall back to HF (which is unreliable on this box)."""
+    from nemo.collections.asr.models import SortformerEncLabelModel
+
+    repo, fname = MODELS[mode]
+    local = MODEL_DIR / fname
+    if local.exists():
+        return SortformerEncLabelModel.restore_from(str(local), map_location="cpu"), str(local)
+    return SortformerEncLabelModel.from_pretrained(repo), repo
 
 
 def ensure_hf_token() -> None:
@@ -103,10 +121,9 @@ def read_rttm(path: Path) -> list[dict]:
 # --------------------------------------------------------------------------- #
 def run_sortformer(mode: str, audio: list[Path], out_dir: Path, device: str, batch_size: int):
     import torch
-    from nemo.collections.asr.models import SortformerEncLabelModel
 
     t0 = time.perf_counter()
-    model = SortformerEncLabelModel.from_pretrained(MODELS[mode])
+    model, model_src = load_sortformer(mode)
     model.eval().to(device)
     load_sec = time.perf_counter() - t0
 
@@ -130,7 +147,7 @@ def run_sortformer(mode: str, audio: list[Path], out_dir: Path, device: str, bat
         print(f"[nemo:{mode}] {wav.name}: {rows[-1]['wall_sec']}s "
               f"{rows[-1]['n_speakers']}spk {rows[-1]['n_segments']}seg"
               + (f"  ERROR {err}" if err else ""), flush=True)
-    return {"model": MODELS[mode], "model_load_sec": round(load_sec, 2)}, rows
+    return {"model": model_src, "model_load_sec": round(load_sec, 2)}, rows
 
 
 def run_clustering(mode: str, audio: list[Path], out_dir: Path, device: str, batch_size: int):
@@ -155,6 +172,11 @@ def run_clustering(mode: str, audio: list[Path], out_dir: Path, device: str, bat
     cfg.device = device
     cfg.batch_size = batch_size
     cfg.verbose = False
+    # prefer local .nemo checkpoints over NGC/HF (both flaky on this box)
+    if VAD_NEMO.exists():
+        cfg.diarizer.vad.model_path = str(VAD_NEMO)
+    if SPK_NEMO.exists():
+        cfg.diarizer.speaker_embeddings.model_path = str(SPK_NEMO)
 
     t0 = time.perf_counter()
     diar = ClusteringDiarizer(cfg=cfg)

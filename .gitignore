@@ -1,5 +1,7 @@
 /.venv/
 .venv/
+wheels/
+/tools/nemo_diarize/models/
 /data/
 /src/pre_build/
 /src/pretrained_models/
