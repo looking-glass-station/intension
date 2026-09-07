@@ -109,12 +109,13 @@ def parse_nemo_segments(raw: list[str]) -> list[dict]:
 
 
 def read_rttm(path: Path) -> list[dict]:
+    """Parse from the right - NeMo writes unescaped spaces in the file id."""
     out = []
     for line in path.read_text(encoding="utf-8").splitlines():
         p = line.split()
-        if len(p) >= 8 and p[0] == "SPEAKER":
-            start, dur = float(p[3]), float(p[4])
-            out.append({"start": start, "end": start + dur, "label": p[7]})
+        if len(p) >= 10 and p[0] == "SPEAKER":
+            start, dur, label = float(p[-7]), float(p[-6]), p[-3]
+            out.append({"start": start, "end": start + dur, "label": label})
     return out
 
 
@@ -171,6 +172,7 @@ def run_clustering(mode: str, audio: list[Path], out_dir: Path, device: str, bat
     cfg.diarizer.out_dir = str(work / "out")
     cfg.device = device
     cfg.batch_size = batch_size
+    cfg.num_workers = 0  # Windows: spawned dataloader workers can't pickle NeMo collections
     cfg.verbose = False
     # prefer local .nemo checkpoints over NGC/HF (both flaky on this box)
     if VAD_NEMO.exists():
