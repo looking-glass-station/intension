@@ -2,6 +2,7 @@
 .venv/
 wheels/
 /tools/nemo_diarize/models/
+/benchmarks/diarization/_nemo_summary_*.json
 /data/
 /src/pre_build/
 /src/pretrained_models/
