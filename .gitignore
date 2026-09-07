@@ -1,4 +1,5 @@
 /.venv/
+.venv/
 /data/
 /src/pre_build/
 /src/pretrained_models/

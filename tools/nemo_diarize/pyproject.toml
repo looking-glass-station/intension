@@ -1,0 +1,19 @@
+[project]
+# Isolated environment for NVIDIA NeMo diarization.
+#
+# NeMo cannot share the main intension env: it force-upgrades torch (>=2.12),
+# transformers (5.x), tokenizers and numpy 2.x, which breaks whisperx / pyannote /
+# faster-whisper. So this is a standalone uv project with its own .venv; the main
+# pipeline calls nemo_diarize.py across a subprocess boundary (see src/diarize.py).
+name = "nemo-diarize"
+version = "0.1.0"
+description = "NeMo Sortformer diarization worker, invoked as a subprocess by intension"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "nemo_toolkit[asr]==3.0.0",
+    "cuda-python<13",          # nemo pulls it; pin below 13 to keep resolvable
+    "soundfile>=0.12",
+]
+
+[tool.uv]
+package = false

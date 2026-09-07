@@ -1,27 +1,29 @@
 """
 Diarization benchmark harness.
 
-Phase 1 baselines the project's current diarizer (pyannote/speaker-diarization-3.1
-via whisperx). Phase 2 will add ``--backend nemo`` once the isolated NeMo env
-exists. Both write the same shape of output so they can be diffed.
+Compares diarization backends on the fixed sample in ``diarization/sample.txt``:
 
-Per invocation it:
-  * loads the backend model once (timed),
-  * runs a fixed warmup clip (timed, discarded),
-  * for each WAV in the sample: times the raw ``model(wav)`` call, records
-    realtime factor + torch GPU peak, characterises the speaker segmentation,
-    and writes a hypothesis RTTM.
+  * ``pyannote`` (default) - the project's current diarizer
+    (pyannote/speaker-diarization-3.1 via whisperx), run in-process.
+  * ``nemo`` - NVIDIA NeMo Sortformer, run through the isolated
+    ``tools/nemo_diarize`` env as a subprocess (one call for the whole batch,
+    because NeMo's import alone costs ~2 min).
 
-Outputs (under benchmarks/diarization/, all git-tracked):
+Both produce the same per-file record: realtime factor, GPU peak, and a
+characterisation of the speaker segmentation. Segmentation stats are always
+recomputed here from the hypothesis RTTM, so the two backends are measured by
+identical code.
+
+Outputs (under benchmarks/diarization/, git-tracked):
   results_<backend>.csv        one row per file, appended; existing files skipped
   runs_<backend>.jsonl         one row per invocation (env, device, git, totals)
   hyp_<backend>/<stem>.rttm    hypothesis segments
 
-It never reads or writes anything under data/.
+Never reads or writes anything under data/.
 
-    uv run python benchmarks/bench_diarize.py
-    uv run python benchmarks/bench_diarize.py --limit 2
-    uv run python benchmarks/bench_diarize.py --fresh
+    uv run python benchmarks/bench_diarize.py                 # pyannote
+    uv run python benchmarks/bench_diarize.py --backend nemo
+    uv run python benchmarks/bench_diarize.py --limit 2 --fresh
 """
 from __future__ import annotations
 
@@ -39,11 +41,12 @@ import time
 import wave
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Dict, Iterator, List, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 BENCH_DIR = ROOT / "benchmarks" / "diarization"
+NEMO_DIR = ROOT / "tools" / "nemo_diarize"
 
 print = functools.partial(print, flush=True)  # noqa: A001  progress must survive piping
 
@@ -55,6 +58,8 @@ CSV_FIELDS = [
     "mean_seg_sec", "median_seg_sec", "max_seg_sec",
     "speaker_speech_json",
 ]
+
+Segment = Dict[str, float]
 
 
 # --------------------------------------------------------------------------- #
@@ -71,6 +76,10 @@ def load_sample(sample_file: Path) -> List[Path]:
             raise FileNotFoundError(f"sample entry not found: {line}")
         paths.append(p)
     return paths
+
+
+def rel_of(wav_path: Path) -> str:
+    return str(wav_path.relative_to(ROOT)).replace("\\", "/")
 
 
 def channel_of(wav_path: Path) -> str:
@@ -101,7 +110,6 @@ def make_warmup_clip(dest: Path, seconds: float = 6.0, sr: int = 16000) -> Path:
         w.setframerate(sr)
         frames = bytearray()
         for i in range(int(seconds * sr)):
-            # two alternating "speakers": tone A for 2s, silence 0.5s, tone B ...
             block = int(i / sr / 2.5) % 2
             freq = 180 if block == 0 else 320
             amp = 0 if (i // sr) % 5 == 4 else 6000
@@ -110,18 +118,31 @@ def make_warmup_clip(dest: Path, seconds: float = 6.0, sr: int = 16000) -> Path:
     return dest
 
 
-def segments_to_rttm(rttm_path: Path, wav_name: str, segments: List[Dict[str, float]]) -> None:
+def write_rttm(rttm_path: Path, wav_name: str, segments: List[Segment]) -> None:
     rttm_path.parent.mkdir(parents=True, exist_ok=True)
     name = wav_name.replace(" ", "_")
-    lines = [
-        f"SPEAKER {name} 1 {s['start']:.3f} {s['end'] - s['start']:.3f} "
-        f"<NA> <NA> {s['label']} <NA> <NA>\n"
-        for s in segments
-    ]
-    rttm_path.write_text("".join(lines), encoding="utf-8")
+    rttm_path.write_text(
+        "".join(
+            f"SPEAKER {name} 1 {s['start']:.3f} {s['end'] - s['start']:.3f} "
+            f"<NA> <NA> {s['label']} <NA> <NA>\n"
+            for s in segments
+        ),
+        encoding="utf-8",
+    )
 
 
-def characterise(segments: List[Dict[str, float]], audio_sec: float) -> Dict[str, object]:
+def read_rttm(rttm_path: Path) -> List[Segment]:
+    segs: List[Segment] = []
+    for line in rttm_path.read_text(encoding="utf-8").splitlines():
+        p = line.split()
+        if len(p) < 8 or p[0] != "SPEAKER":
+            continue
+        start, dur = float(p[3]), float(p[4])
+        segs.append({"start": start, "end": start + dur, "label": p[7]})
+    return segs
+
+
+def characterise(segments: List[Segment], audio_sec: float) -> Dict[str, object]:
     durs = [s["end"] - s["start"] for s in segments] or [0.0]
     speech_sec = sum(durs)
     per_speaker: Dict[str, float] = {}
@@ -140,53 +161,101 @@ def characterise(segments: List[Dict[str, float]], audio_sec: float) -> Dict[str
 
 
 # --------------------------------------------------------------------------- #
-# backends: each returns (load_fn, diarize_fn, meta_dict)
+# backends
+#
+# each yields (wav_path, wall_sec, gpu_mb) per file, having already written
+# hyp_<backend>/<stem>.rttm. Segmentation stats are computed by the caller from
+# that RTTM. Returns a (meta_dict, load_sec) pair via the generator's return.
 # --------------------------------------------------------------------------- #
-def backend_pyannote():
+def run_pyannote(todo: List[Path], hyp_dir: Path) -> Iterator[Tuple[Path, float, float]]:
     if str(SRC) not in sys.path:
         sys.path.insert(0, str(SRC))
-    # measure the raw model, not the pipeline's post-processing merge
-    os.environ.setdefault("INTENSION_MERGE_SHORT_DIARIZATION_SEGMENTS", "0")
+    os.environ.setdefault("INTENSION_MERGE_SHORT_DIARIZATION_SEGMENTS", "0")  # measure raw model
 
-    import torch  # noqa: F401  (imported for the caller's GPU stats)
+    import torch
+    import whisperx  # noqa: F401
     from diarize import Diarizer
 
-    state: Dict[str, object] = {}
+    t0 = time.perf_counter()
+    diarizer = Diarizer()
+    diarizer._ensure_model()
+    model = diarizer.model
+    load_sec = time.perf_counter() - t0
+    print(f"pyannote model loaded in {load_sec:.1f}s")
 
-    def load() -> Dict[str, str]:
-        d = Diarizer()
-        d._ensure_model()
-        state["model"] = d.model
-        import whisperx
+    warm = make_warmup_clip(Path(os.environ.get("TEMP", "/tmp")) / "bench_diarize_warmup.wav")
+    t0 = time.perf_counter()
+    try:
+        model(str(warm))
+    except Exception as e:
+        print(f"  warmup raised {e!r}")
+    print(f"warmup ({time.perf_counter() - t0:.1f}s) done\n")
 
-        return {
-            "model_name": "pyannote/speaker-diarization-3.1",
-            "whisperx": getattr(whisperx, "__version__", "?"),
-        }
-
-    def diarize(wav_path: Path) -> List[Dict[str, float]]:
-        result = state["model"](str(wav_path))
+    def diarize(wav: Path) -> List[Segment]:
+        result = model(str(wav))
         df = result["diarization"] if isinstance(result, dict) and "diarization" in result else result
-        segs: List[Dict[str, float]] = []
-        for _, row in df.iterrows():
-            segs.append({
-                "start": float(row["start"]),
-                "end": float(row["end"]),
-                "label": row.get("speaker") or row.get("label"),
-            })
-        return segs
+        return [
+            {"start": float(r["start"]), "end": float(r["end"]),
+             "label": r.get("speaker") or r.get("label")}
+            for _, r in df.iterrows()
+        ]
 
-    return load, diarize
+    for wav in todo:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        t0 = time.perf_counter()
+        segs = diarize(wav)
+        wall = time.perf_counter() - t0
+        gpu_mb = (torch.cuda.max_memory_allocated() / 1e6) if torch.cuda.is_available() else 0.0
+        write_rttm(hyp_dir / f"{wav.stem}.rttm", wav.name, segs)
+        yield wav, wall, gpu_mb
+
+    return {
+        "model_name": "pyannote/speaker-diarization-3.1",
+        "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+        "torch": torch.__version__,
+        "model_load_sec": round(load_sec, 2),
+    }
 
 
-def backend_nemo():
-    raise SystemExit(
-        "backend 'nemo' is not wired up yet (Phase 2 - needs the isolated "
-        "tools/nemo_diarize/ env). Run without --backend for the pyannote baseline."
-    )
+def run_nemo(todo: List[Path], hyp_dir: Path) -> Iterator[Tuple[Path, float, float]]:
+    py = NEMO_DIR / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not py.exists():
+        raise SystemExit(f"NeMo env not synced: {py} missing (run `uv sync` in {NEMO_DIR})")
+
+    summary_path = BENCH_DIR / "_nemo_summary.json"
+    cmd = [
+        str(py), str(NEMO_DIR / "nemo_diarize.py"),
+        "--out-dir", str(hyp_dir),
+        "--json-out", str(summary_path),
+        "--device", "auto",
+        "--audio", *[str(p) for p in todo],
+    ]
+    print(f"running NeMo worker over {len(todo)} files (one process; NeMo import ~2 min)...")
+    t0 = time.perf_counter()
+    proc = subprocess.run(cmd)
+    print(f"NeMo worker finished in {(time.perf_counter() - t0) / 60:.1f} min (rc={proc.returncode})")
+    if proc.returncode != 0 or not summary_path.exists():
+        raise SystemExit(f"NeMo worker failed (rc={proc.returncode})")
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    by_stem = {r["stem"]: r for r in summary["files"]}
+    for wav in todo:
+        r = by_stem.get(wav.stem)
+        if r is None:
+            print(f"  !! no NeMo result for {wav.stem}")
+            continue
+        yield wav, float(r["wall_sec"]), float(r.get("torch_gpu_peak_mb") or 0.0)
+
+    return {
+        "model_name": summary.get("model"),
+        "device": summary.get("device"),
+        "torch": summary.get("torch"),
+        "model_load_sec": summary.get("model_load_sec"),
+    }
 
 
-BACKENDS: Dict[str, Callable] = {"pyannote": backend_pyannote, "nemo": backend_nemo}
+RUNNERS = {"pyannote": run_pyannote, "nemo": run_nemo}
 
 
 # --------------------------------------------------------------------------- #
@@ -204,7 +273,7 @@ def git_commit() -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--backend", default="pyannote", choices=sorted(BACKENDS))
+    ap.add_argument("--backend", default="pyannote", choices=sorted(RUNNERS))
     ap.add_argument("--sample", type=Path, default=BENCH_DIR / "sample.txt")
     ap.add_argument("--limit", type=int, default=0, help="only the first N sample files")
     ap.add_argument("--fresh", action="store_true", help="ignore existing results and redo every file")
@@ -225,98 +294,67 @@ def main() -> None:
         with results_csv.open(encoding="utf-8") as fh:
             done = {r["file"] for r in csv.DictReader(fh)}
 
-    todo = [p for p in sample if str(p.relative_to(ROOT)).replace("\\", "/") not in done]
-    print(f"backend={args.backend}  sample={len(sample)}  already done={len(sample) - len(todo)}  to run={len(todo)}")
+    todo = [p for p in sample if rel_of(p) not in done]
+    print(f"backend={args.backend}  sample={len(sample)}  done={len(sample) - len(todo)}  to run={len(todo)}")
     if not todo:
         print("nothing to do (use --fresh to redo)")
         return
 
-    import torch
-
     run_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    load_fn, diarize_fn = BACKENDS[args.backend]()
+    probes = {wav: wav_probe(wav) for wav in todo}
 
-    t0 = time.perf_counter()
-    backend_meta = load_fn()
-    load_sec = time.perf_counter() - t0
-    print(f"model loaded in {load_sec:.1f}s")
-
-    warm = make_warmup_clip(Path(os.environ.get("TEMP", "/tmp")) / "bench_diarize_warmup.wav")
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-    t0 = time.perf_counter()
-    try:
-        diarize_fn(warm)
-    except Exception as e:  # warmup failure isn't fatal, but say so
-        print(f"  warmup call raised {e!r}")
-    warm_sec = time.perf_counter() - t0
-    print(f"warmup ({warm_sec:.1f}s) done\n")
-
-    new_file = not results_csv.exists()
     fh = results_csv.open("a", newline="", encoding="utf-8")
     writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
-    if new_file:
+    if fh.tell() == 0:
         writer.writeheader()
 
     totals = {"audio": 0.0, "wall": 0.0}
-    for i, wav in enumerate(todo, 1):
-        rel = str(wav.relative_to(ROOT)).replace("\\", "/")
-        probe = wav_probe(wav)
-        audio_sec = probe["audio_sec"]
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-        print(f"[{i}/{len(todo)}] {wav.name}  ({audio_sec / 60:.1f} min, {probe['subtype']})")
-
-        t0 = time.perf_counter()
-        segments = diarize_fn(wav)
-        wall_sec = time.perf_counter() - t0
-        gpu_mb = (torch.cuda.max_memory_allocated() / 1e6) if torch.cuda.is_available() else 0.0
-
-        segments_to_rttm(hyp_dir / f"{wav.stem}.rttm", wav.name, segments)
-        stats = characterise(segments, audio_sec)
-        row = {
-            "run_ts": run_ts, "backend": args.backend,
-            "channel": channel_of(wav), "file": rel,
-            "audio_sec": round(audio_sec, 2), "sr": probe["sr"], "subtype": probe["subtype"],
-            "wall_sec": round(wall_sec, 2),
-            "rtx": round(audio_sec / wall_sec, 2) if wall_sec else 0.0,
-            "torch_gpu_peak_mb": round(gpu_mb, 1),
-            **stats,
-        }
-        writer.writerow(row)
-        fh.flush()
-        totals["audio"] += audio_sec
-        totals["wall"] += wall_sec
-        print(
-            f"      {row['wall_sec']:.1f}s  {row['rtx']:.1f}xRT  "
-            f"{row['n_speakers']} spk  {row['n_segments']} seg  "
-            f"speech {row['speech_ratio'] * 100:.0f}%  gpu {row['torch_gpu_peak_mb']:.0f}MB"
-        )
-
-    fh.close()
+    gen = RUNNERS[args.backend](todo, hyp_dir)
+    meta: Dict[str, object] = {}
+    try:
+        while True:
+            wav, wall_sec, gpu_mb = next(gen)
+            probe = probes[wav]
+            audio_sec = float(probe["audio_sec"])
+            segs = read_rttm(hyp_dir / f"{wav.stem}.rttm")
+            stats = characterise(segs, audio_sec)
+            row = {
+                "run_ts": run_ts, "backend": args.backend,
+                "channel": channel_of(wav), "file": rel_of(wav),
+                "audio_sec": round(audio_sec, 2), "sr": probe["sr"], "subtype": probe["subtype"],
+                "wall_sec": round(wall_sec, 2),
+                "rtx": round(audio_sec / wall_sec, 2) if wall_sec else 0.0,
+                "torch_gpu_peak_mb": round(gpu_mb, 1),
+                **stats,
+            }
+            writer.writerow(row)
+            fh.flush()
+            totals["audio"] += audio_sec
+            totals["wall"] += wall_sec
+            print(
+                f"  {wav.name[:55]:55}  {row['wall_sec']:7.1f}s  {row['rtx']:6.1f}xRT  "
+                f"{row['n_speakers']:2} spk  {row['n_segments']:5} seg  speech {row['speech_ratio'] * 100:3.0f}%"
+            )
+    except StopIteration as stop:
+        meta = stop.value or {}
+    finally:
+        fh.close()
 
     with runs_jsonl.open("a", encoding="utf-8") as jf:
         jf.write(json.dumps({
-            "run_ts": run_ts,
-            "backend": args.backend,
-            "git": git_commit(),
-            "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
-            "torch": torch.__version__,
-            "cuda": torch.version.cuda,
-            "model_load_sec": round(load_sec, 2),
-            "warmup_sec": round(warm_sec, 2),
+            "run_ts": run_ts, "backend": args.backend, "git": git_commit(),
             "files": len(todo),
             "audio_sec": round(totals["audio"], 1),
             "wall_sec": round(totals["wall"], 1),
             "overall_rtx": round(totals["audio"] / totals["wall"], 2) if totals["wall"] else 0.0,
-            **backend_meta,
+            **meta,
         }) + "\n")
 
-    print(
-        f"\n=== {args.backend}: {len(todo)} files, "
-        f"{totals['audio'] / 3600:.2f}h audio in {totals['wall'] / 60:.1f} min "
-        f"=> {totals['audio'] / totals['wall']:.1f}x realtime (excl. {load_sec:.0f}s load) ==="
-    )
+    if totals["wall"]:
+        print(
+            f"\n=== {args.backend}: {len(todo)} files, {totals['audio'] / 3600:.2f}h audio "
+            f"in {totals['wall'] / 60:.1f} min => {totals['audio'] / totals['wall']:.1f}x realtime ==="
+        )
 
 
 if __name__ == "__main__":
