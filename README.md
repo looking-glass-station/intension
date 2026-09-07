@@ -15,37 +15,49 @@ It uses a collection of preexisting tools including:
 * Manual files in a directory
 
 ## Installation
-Use Python 3.10 or 3.11 for this project. Python 3.12 can trigger dependency conflicts
-(notably around `whisperx` / `pyannote` / `av`) and lead to failed builds on Windows. 
 
-Dependency hell! 
-
-The project declares this in `pyproject.toml` as:
-`requires-python = ">=3.10,<3.12"`
-
-Recommended setup (Windows PowerShell):
+This project is managed with [uv](https://docs.astral.sh/uv/). The environment is
+defined by `pyproject.toml` + `uv.lock`; `.venv` is a disposable build artifact
+regenerated from the lockfile.
 
 ```powershell
 # from project root
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-# upgrade packaging tools first
-python -m pip install --upgrade pip setuptools wheel
-
-# enforce project python compatibility from pyproject.toml
-pip install -e .
-
-# install runtime dependencies
-pip install -r requirements.txt
+uv sync
 ```
 
-If you need CUDA 11.8 wheels explicitly, install PyTorch first (this is a good idea, it's very annoying):
+That creates `.venv` with CPython 3.11 (pinned in `.python-version`) and installs
+the locked dependencies, including the CUDA 11.8 PyTorch build pulled from
+PyTorch's own package index (configured under `[tool.uv.sources]`).
+
+Run everything through uv so it uses the project environment:
 
 ```powershell
-pip install torch==2.5.1+cu118 torchaudio==2.5.1+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
-pip install -r requirements.txt
+uv run python -m pipelines.all
+uv run python src/intention_cli.py process C:\path\to\audio.mp3 --output-dir C:\out
 ```
+
+### Python version
+
+Dependency hell! Use **Python 3.11** (3.10 also works). Python 3.12+ triggers
+conflicts across the `whisperx` / `pyannote` / `av` / `ctranslate2` stack and fails
+to build on Windows, so `requires-python` is pinned `>=3.11,<3.12`.
+
+### JS runtime for YouTube downloads
+
+`yt-dlp` needs a JavaScript runtime to solve YouTube's EJS player challenges
+(`yt-dlp-ejs`). `src/download_youtube.py` looks for one, in order: `YT_DLP_JS` /
+`DENO_EXE` env vars, `deno` on `PATH`, `~/.deno/bin/deno.exe`, then
+`.venv/Scripts/deno.exe`. Node (`C:\Program Files\nodejs\node.exe`) also works.
+
+Install Deno (2.9+) once, per user — it survives `.venv` rebuilds there:
+
+```powershell
+irm https://deno.land/install.ps1 | iex     # installs to ~/.deno/bin, adds it to PATH
+```
+
+Or drop `deno.exe` from https://github.com/denoland/deno/releases into
+`~/.deno/bin/`. No `deno.json` or npm setup is needed — the project only uses Deno
+as yt-dlp's challenge interpreter.
 
 ## 🔑 Generate authentication keys
 You will need to generate authentication keys for: 

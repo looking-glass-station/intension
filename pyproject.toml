@@ -1,0 +1,97 @@
+[project]
+name = "intension"
+version = "0.1.0"
+description = "Config-driven YouTube/Twitch/Patreon downloader, diarizer, transcriber, host matcher and bias/invective classifier"
+readme = "README.md"
+# whisperx 3.3.1 requires >=3.9,<3.13; pyannote/av/ctranslate2 practically cap it
+# at <3.12 on Windows. 3.11 is the supported target; 3.10 also works.
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    # --- ML / audio core (versions match the last known-good environment) ---
+    "torch==2.5.1+cu118",
+    "torchaudio==2.5.1+cu118",
+    "numpy==1.26.4",              # nothing here is ready for numpy 2.x
+    "whisperx==3.3.1",
+    "faster-whisper==1.1.0",
+    "av==12.0.0",                 # faster-whisper wants av>=11; av 15+ changed APIs
+    "ctranslate2==4.4.0",         # whisperx pins <4.5.0; CUDA 11 build
+    "transformers==4.40.2",
+    "huggingface-hub==0.19.4",    # pyannote 3.3.2 uses the pre-1.0 hub download API
+    "pyannote.audio==3.3.2",
+    "resemblyzer==0.1.4",
+    # resemblyzer pulls webrtcvad, whose only PyPI dist is an sdist needing MSVC.
+    # webrtcvad-wheels ships the same `webrtcvad` module as prebuilt wheels; the
+    # [tool.uv] override below drops the source-only webrtcvad requirement.
+    "webrtcvad-wheels==2.0.14",
+    "detoxify==0.5.2",
+    "omegaconf==2.3.0",
+    "spacy==3.8.11",
+    "librosa==0.11.0",
+    "soundfile==0.13.1",
+    "ffmpeg-python==0.2.0",
+
+    # NOTE: the old .venv also carried nvidia-*-cu117 / nvidia-cudnn-cu11 wheels.
+    # Those are stale leftovers from an earlier torch+cu117 install and are not on
+    # PyPI. torch==2.5.1+cu118 bundles its own CUDA/cuDNN libs in the Windows
+    # wheel (torch/lib), which ctranslate2 picks up when torch is imported first.
+    # If GPU transcription can't find cuDNN, `uv pip install nvidia-cudnn-cu11`
+    # from https://pypi.ngc.nvidia.com as a one-off.
+
+    # --- data / config ---
+    "pandas==2.3.3",
+    "pillow==12.1.1",
+    "marshmallow==3.26.2",
+    "dataclasses-json==0.6.7",
+
+    # --- downloaders / APIs ---
+    "yt-dlp==2026.3.3",
+    "yt-dlp-ejs==0.4.0",
+    "twitch-dl==3.3.1",
+    "scrapetube==2.6.0",
+    "patreon-dl==0.0.1",
+    "browser-cookie3==0.20.1",
+    "google-api-python-client==2.190.0",
+    "aiohttp==3.13.3",
+    "yarl==1.22.0",
+
+    # --- utilities ---
+    "tqdm==4.67.3",
+    "tqdm-sound==1.3.2",
+    "dateparser==1.3.0",
+    "isodate==0.7.2",
+    "pathvalidate==3.3.1",
+    "ollama==0.6.1",
+
+    # setuptools>=81 drops pkg_resources, which some deps still import at runtime;
+    # whisperx needs >=65.
+    "setuptools>=65,<71",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.uv]
+package = false
+# Drop two source-only C-extension deps that have no wheels for current Python
+# and would need MSVC to build:
+#   - webrtcvad (via resemblyzer): webrtcvad-wheels above provides the same module
+#   - simpleaudio (via tqdm-sound): declared but never imported; tqdm-sound 1.3.2
+#     plays audio through sounddevice
+# The always-false marker makes each override remove the requirement entirely.
+override-dependencies = [
+    "webrtcvad ; python_version < '3.0'",
+    "simpleaudio ; python_version < '3.0'",
+]
+
+# torch/torchaudio with the +cu118 local version come from PyTorch's own index.
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu118" }
+torchaudio = { index = "pytorch-cu118" }
