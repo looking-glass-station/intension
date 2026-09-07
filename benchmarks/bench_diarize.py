@@ -5,9 +5,13 @@ Compares diarization backends on the fixed sample in ``diarization/sample.txt``:
 
   * ``pyannote`` (default) - the project's current diarizer
     (pyannote/speaker-diarization-3.1 via whisperx), run in-process.
-  * ``nemo`` - NVIDIA NeMo Sortformer, run through the isolated
-    ``tools/nemo_diarize`` env as a subprocess (one call for the whole batch,
-    because NeMo's import alone costs ~2 min).
+  * ``nemo-sf-offline``    - NeMo diar_sortformer_4spk-v1 (OOMs on long audio)
+  * ``nemo-sf-stream``     - NeMo diar_streaming_sortformer_4spk-v2.1
+  * ``nemo-clust-general`` - NeMo ClusteringDiarizer, diar_infer_general.yaml
+  * ``nemo-clust-meeting`` - NeMo ClusteringDiarizer, diar_infer_meeting.yaml
+
+  The nemo-* backends run through the isolated ``tools/nemo_diarize`` env as a
+  subprocess (one call for the whole batch - NeMo's import alone costs ~2 min).
 
 Both produce the same per-file record: realtime factor, GPU peak, and a
 characterisation of the speaker segmentation. Segmentation stats are always
@@ -218,44 +222,60 @@ def run_pyannote(todo: List[Path], hyp_dir: Path) -> Iterator[Tuple[Path, float,
     }
 
 
-def run_nemo(todo: List[Path], hyp_dir: Path) -> Iterator[Tuple[Path, float, float]]:
-    py = NEMO_DIR / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    if not py.exists():
-        raise SystemExit(f"NeMo env not synced: {py} missing (run `uv sync` in {NEMO_DIR})")
-
-    summary_path = BENCH_DIR / "_nemo_summary.json"
-    cmd = [
-        str(py), str(NEMO_DIR / "nemo_diarize.py"),
-        "--out-dir", str(hyp_dir),
-        "--json-out", str(summary_path),
-        "--device", "auto",
-        "--audio", *[str(p) for p in todo],
-    ]
-    print(f"running NeMo worker over {len(todo)} files (one process; NeMo import ~2 min)...")
-    t0 = time.perf_counter()
-    proc = subprocess.run(cmd)
-    print(f"NeMo worker finished in {(time.perf_counter() - t0) / 60:.1f} min (rc={proc.returncode})")
-    if proc.returncode != 0 or not summary_path.exists():
-        raise SystemExit(f"NeMo worker failed (rc={proc.returncode})")
-
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    by_stem = {r["stem"]: r for r in summary["files"]}
-    for wav in todo:
-        r = by_stem.get(wav.stem)
-        if r is None:
-            print(f"  !! no NeMo result for {wav.stem}")
-            continue
-        yield wav, float(r["wall_sec"]), float(r.get("torch_gpu_peak_mb") or 0.0)
-
-    return {
-        "model_name": summary.get("model"),
-        "device": summary.get("device"),
-        "torch": summary.get("torch"),
-        "model_load_sec": summary.get("model_load_sec"),
-    }
+# bench backend name -> nemo_diarize.py --mode
+NEMO_MODES = {
+    "nemo-sf-offline": "sortformer-offline",
+    "nemo-sf-stream": "sortformer-streaming",
+    "nemo-clust-general": "clustering-general",
+    "nemo-clust-meeting": "clustering-meeting",
+}
 
 
-RUNNERS = {"pyannote": run_pyannote, "nemo": run_nemo}
+def make_nemo_runner(mode: str):
+    def run(todo: List[Path], hyp_dir: Path) -> Iterator[Tuple[Path, float, float]]:
+        py = NEMO_DIR / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        if not py.exists():
+            raise SystemExit(f"NeMo env not synced: {py} missing (run `uv sync` in {NEMO_DIR})")
+
+        summary_path = BENCH_DIR / f"_nemo_summary_{mode}.json"
+        cmd = [
+            str(py), str(NEMO_DIR / "nemo_diarize.py"),
+            "--mode", mode,
+            "--out-dir", str(hyp_dir),
+            "--json-out", str(summary_path),
+            "--device", "auto",
+            "--audio", *[str(p) for p in todo],
+        ]
+        print(f"running NeMo worker (mode={mode}) over {len(todo)} files "
+              f"(one process; NeMo import ~2 min)...")
+        t0 = time.perf_counter()
+        proc = subprocess.run(cmd)
+        print(f"NeMo worker finished in {(time.perf_counter() - t0) / 60:.1f} min (rc={proc.returncode})")
+        if not summary_path.exists():
+            raise SystemExit(f"NeMo worker produced no summary (rc={proc.returncode})")
+
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        by_stem = {r["stem"]: r for r in summary["files"]}
+        for wav in todo:
+            r = by_stem.get(wav.stem)
+            if r is None:
+                print(f"  !! no NeMo result for {wav.stem}")
+                continue
+            if r.get("error"):
+                print(f"  !! {wav.stem}: {r['error']}")
+            yield wav, float(r["wall_sec"]), float(r.get("torch_gpu_peak_mb") or 0.0)
+
+        return {
+            "model_name": summary.get("model"),
+            "device": summary.get("device"),
+            "torch": summary.get("torch"),
+            "model_load_sec": summary.get("model_load_sec"),
+        }
+
+    return run
+
+
+RUNNERS = {"pyannote": run_pyannote, **{k: make_nemo_runner(v) for k, v in NEMO_MODES.items()}}
 
 
 # --------------------------------------------------------------------------- #

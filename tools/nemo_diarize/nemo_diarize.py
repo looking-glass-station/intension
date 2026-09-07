@@ -1,39 +1,50 @@
 """
-NeMo Sortformer diarization worker.
+NeMo diarization worker (multi-backend).
 
-Runs in this directory's isolated .venv (NeMo pins torch/transformers/numpy in ways
-that are incompatible with the main intension env). Invoked as a subprocess by
-``src/diarize.py`` and ``benchmarks/bench_diarize.py``.
+Runs in this directory's isolated .venv and is invoked as a subprocess by
+``benchmarks/bench_diarize.py`` (and, eventually, ``src/diarize.py``).
 
-    python nemo_diarize.py --audio A.wav [B.wav ...] --out-dir DIR
-                           [--model nvidia/diar_sortformer_4spk-v1]
-                           [--device auto|cuda|cpu] [--json-out summary.json]
+    python nemo_diarize.py --mode MODE --audio A.wav [B.wav ...] --out-dir DIR
+                           [--json-out summary.json] [--device auto|cuda|cpu]
 
-For each input it writes ``<out-dir>/<stem>.rttm`` (same format the pipeline uses)
-and, if ``--json-out`` is given, a JSON summary there (timings + per-file speaker
-stats). NeMo spews to stdout/stderr, so machine-readable output goes to the file,
-never stdout.
+Modes:
+  sortformer-offline    nvidia/diar_sortformer_4spk-v1 - end-to-end, <=4 speakers.
+                        Processes the whole file at once: OOMs on long audio.
+  sortformer-streaming  nvidia/diar_streaming_sortformer_4spk-v2.1 - end-to-end,
+                        <=4 speakers, streaming state so it handles long audio.
+  clustering-general    NeMo ClusteringDiarizer, diar_infer_general.yaml
+  clustering-meeting    NeMo ClusteringDiarizer, diar_infer_meeting.yaml
+                        (VAD MarbleNet + TitaNet-L embeddings + NME-SC clustering;
+                        arbitrary length and speaker count)
 
-Note: diar_sortformer_4spk-v1 is capped at 4 speakers. For content with more
-(streams, call-ins) use --model with a clustering config instead, or expect the
-extra speakers to be merged.
+For each input it writes ``<out-dir>/<stem>.rttm`` (pipeline format) and, with
+``--json-out``, a JSON summary (per-file timings + speaker stats). NeMo spews to
+stdout/stderr, so machine-readable output goes to the file only.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shutil
+import tempfile
 import time
 from pathlib import Path
 
 import soundfile as sf
 
+MODELS = {
+    "sortformer-offline": "nvidia/diar_sortformer_4spk-v1",
+    "sortformer-streaming": "nvidia/diar_streaming_sortformer_4spk-v2.1",
+}
+CLUSTER_CONF = {
+    "clustering-general": "diar_infer_general.yaml",
+    "clustering-meeting": "diar_infer_meeting.yaml",
+}
+CONF_DIR = Path(__file__).resolve().parent / "conf"
+
 
 def ensure_hf_token() -> None:
-    """
-    Sortformer is a gated-ish HF download; unauthenticated pulls get rate-limited
-    to a stall. Reuse the pipeline's token if the caller didn't pass one in env.
-    """
     if os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"):
         return
     token_file = Path(__file__).resolve().parents[2] / "tokens" / "huggingface"
@@ -42,18 +53,6 @@ def ensure_hf_token() -> None:
         if tok:
             os.environ["HF_TOKEN"] = tok
             os.environ["HUGGING_FACE_HUB_TOKEN"] = tok
-
-
-def parse_segments(raw: list[str]) -> list[dict]:
-    """NeMo returns ['<start> <end> <speaker>', ...] per audio file."""
-    segs: list[dict] = []
-    for line in raw:
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        start, end = float(parts[0]), float(parts[1])
-        segs.append({"start": start, "end": end, "label": parts[2]})
-    return segs
 
 
 def write_rttm(path: Path, wav_name: str, segs: list[dict]) -> None:
@@ -81,76 +80,154 @@ def characterise(segs: list[dict]) -> dict:
     }
 
 
+def parse_nemo_segments(raw: list[str]) -> list[dict]:
+    """Sortformer returns ['<start> <end> <speaker>', ...] per audio file."""
+    out = []
+    for line in raw:
+        p = line.split()
+        if len(p) >= 3:
+            out.append({"start": float(p[0]), "end": float(p[1]), "label": p[2]})
+    return out
+
+
+def read_rttm(path: Path) -> list[dict]:
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        p = line.split()
+        if len(p) >= 8 and p[0] == "SPEAKER":
+            start, dur = float(p[3]), float(p[4])
+            out.append({"start": start, "end": start + dur, "label": p[7]})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+def run_sortformer(mode: str, audio: list[Path], out_dir: Path, device: str, batch_size: int):
+    import torch
+    from nemo.collections.asr.models import SortformerEncLabelModel
+
+    t0 = time.perf_counter()
+    model = SortformerEncLabelModel.from_pretrained(MODELS[mode])
+    model.eval().to(device)
+    load_sec = time.perf_counter() - t0
+
+    rows = []
+    for wav in audio:
+        info = sf.info(str(wav))
+        audio_sec = info.frames / float(info.samplerate)
+        if device == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+        t0 = time.perf_counter()
+        try:
+            preds = model.diarize(audio=str(wav), batch_size=batch_size, verbose=False)
+            segs = parse_nemo_segments(preds[0] if preds else [])
+            err = None
+        except Exception as e:  # noqa: BLE001  record and continue
+            segs, err = [], f"{type(e).__name__}: {str(e)[:200]}"
+        wall = time.perf_counter() - t0
+        gpu_mb = (torch.cuda.max_memory_allocated() / 1e6) if device == "cuda" else 0.0
+        write_rttm(out_dir / f"{wav.stem}.rttm", wav.name, segs)
+        rows.append(_row(wav, info, audio_sec, wall, gpu_mb, segs, err))
+        print(f"[nemo:{mode}] {wav.name}: {rows[-1]['wall_sec']}s "
+              f"{rows[-1]['n_speakers']}spk {rows[-1]['n_segments']}seg"
+              + (f"  ERROR {err}" if err else ""), flush=True)
+    return {"model": MODELS[mode], "model_load_sec": round(load_sec, 2)}, rows
+
+
+def run_clustering(mode: str, audio: list[Path], out_dir: Path, device: str, batch_size: int):
+    import torch
+    from omegaconf import OmegaConf
+    from nemo.collections.asr.models import ClusteringDiarizer
+
+    conf_path = CONF_DIR / CLUSTER_CONF[mode]
+    cfg = OmegaConf.load(str(conf_path))
+    work = Path(tempfile.mkdtemp(prefix="nemo_clust_"))
+    manifest = work / "manifest.json"
+    with manifest.open("w", encoding="utf-8") as fh:
+        for wav in audio:
+            fh.write(json.dumps({
+                "audio_filepath": str(wav), "offset": 0, "duration": None,
+                "label": "infer", "text": "-", "num_speakers": None,
+                "rttm_filepath": None, "uem_filepath": None,
+            }) + "\n")
+
+    cfg.diarizer.manifest_filepath = str(manifest)
+    cfg.diarizer.out_dir = str(work / "out")
+    cfg.device = device
+    cfg.batch_size = batch_size
+    cfg.verbose = False
+
+    t0 = time.perf_counter()
+    diar = ClusteringDiarizer(cfg=cfg)
+    load_sec = time.perf_counter() - t0
+
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    t0 = time.perf_counter()
+    diar.diarize()
+    total_wall = time.perf_counter() - t0
+    gpu_mb = (torch.cuda.max_memory_allocated() / 1e6) if device == "cuda" else 0.0
+
+    pred_dir = Path(cfg.diarizer.out_dir) / "pred_rttms"
+    per_file_wall = total_wall / max(len(audio), 1)  # ClusteringDiarizer batches; no per-file split
+    rows = []
+    for wav in audio:
+        info = sf.info(str(wav))
+        audio_sec = info.frames / float(info.samplerate)
+        src = pred_dir / f"{wav.stem}.rttm"
+        segs = read_rttm(src) if src.exists() else []
+        err = None if src.exists() else "no pred rttm"
+        write_rttm(out_dir / f"{wav.stem}.rttm", wav.name, segs)
+        rows.append(_row(wav, info, audio_sec, per_file_wall, gpu_mb, segs, err))
+        print(f"[nemo:{mode}] {wav.name}: {rows[-1]['n_speakers']}spk "
+              f"{rows[-1]['n_segments']}seg" + (f"  {err}" if err else ""), flush=True)
+
+    shutil.rmtree(work, ignore_errors=True)
+    return {
+        "model": f"ClusteringDiarizer/{CLUSTER_CONF[mode]}",
+        "model_load_sec": round(load_sec, 2),
+        "batched_total_wall_sec": round(total_wall, 2),
+    }, rows
+
+
+def _row(wav: Path, info, audio_sec, wall, gpu_mb, segs, err) -> dict:
+    return {
+        "stem": wav.stem, "input": str(wav),
+        "audio_sec": round(audio_sec, 2), "sr": info.samplerate, "subtype": info.subtype,
+        "wall_sec": round(wall, 2),
+        "rtx": round(audio_sec / wall, 2) if wall else 0.0,
+        "torch_gpu_peak_mb": round(gpu_mb, 1),
+        "error": err,
+        **characterise(segs),
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--mode", required=True, choices=[*MODELS, *CLUSTER_CONF])
     ap.add_argument("--audio", nargs="+", required=True, type=Path)
     ap.add_argument("--out-dir", required=True, type=Path)
-    ap.add_argument("--model", default="nvidia/diar_sortformer_4spk-v1")
-    ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     ap.add_argument("--json-out", type=Path)
+    ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     ap.add_argument("--batch-size", type=int, default=1)
     args = ap.parse_args()
 
     ensure_hf_token()
-
     import torch
-    from nemo.collections.asr.models import SortformerEncLabelModel
 
     device = args.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    t0 = time.perf_counter()
-    model = SortformerEncLabelModel.from_pretrained(args.model)
-    model.eval()
-    model.to(device)
-    load_sec = time.perf_counter() - t0
-
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    results = []
-    for wav in args.audio:
-        wav = wav.resolve()
-        info = sf.info(str(wav))
-        audio_sec = info.frames / float(info.samplerate)
+    audio = [p.resolve() for p in args.audio]
 
-        if device == "cuda":
-            torch.cuda.reset_peak_memory_stats()
-        t0 = time.perf_counter()
-        preds = model.diarize(audio=str(wav), batch_size=args.batch_size, verbose=False)
-        wall_sec = time.perf_counter() - t0
-        gpu_mb = (torch.cuda.max_memory_allocated() / 1e6) if device == "cuda" else 0.0
+    runner = run_sortformer if args.mode in MODELS else run_clustering
+    meta, rows = runner(args.mode, audio, args.out_dir, device, args.batch_size)
 
-        segs = parse_segments(preds[0] if preds else [])
-        rttm_path = args.out_dir / f"{wav.stem}.rttm"
-        write_rttm(rttm_path, wav.name, segs)
-
-        row = {
-            "stem": wav.stem,
-            "input": str(wav),
-            "rttm": str(rttm_path),
-            "audio_sec": round(audio_sec, 2),
-            "sr": info.samplerate,
-            "subtype": info.subtype,
-            "wall_sec": round(wall_sec, 2),
-            "rtx": round(audio_sec / wall_sec, 2) if wall_sec else 0.0,
-            "torch_gpu_peak_mb": round(gpu_mb, 1),
-            **characterise(segs),
-        }
-        results.append(row)
-        print(f"[nemo] {wav.name}: {row['wall_sec']}s {row['rtx']}xRT "
-              f"{row['n_speakers']}spk {row['n_segments']}seg", flush=True)
-
-    summary = {
-        "model": args.model,
-        "device": device,
-        "torch": torch.__version__,
-        "model_load_sec": round(load_sec, 2),
-        "files": results,
-    }
+    summary = {"mode": args.mode, "device": device, "torch": torch.__version__, **meta, "files": rows}
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
         args.json_out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print("[nemo] done", flush=True)
+    print(f"[nemo:{args.mode}] done", flush=True)
 
 
 if __name__ == "__main__":
