@@ -171,8 +171,10 @@ def build_ser(model_id: str):
 def ser_adv(clip: np.ndarray, sr: int, ser) -> Dict[str, float]:
     """arousal / dominance / valence in [0, 1] for one audio clip."""
     processor, model, device = ser
+    if clip.ndim > 1:
+        clip = clip.mean(axis=1)
     if sr != 16000:
-        clip = librosa.resample(clip, orig_sr=sr, target_sr=16000)
+        clip = librosa.resample(np.ascontiguousarray(clip), orig_sr=sr, target_sr=16000)
     inputs = processor(clip, sampling_rate=16000, return_tensors="pt").input_values.to(device)
     out = model(inputs)[0].cpu().numpy()  # [arousal, dominance, valence]
     return {"arousal": float(out[0]), "dominance": float(out[1]), "valence": float(out[2])}
