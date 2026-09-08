@@ -300,7 +300,6 @@ class GlobalConfig:
     # or "pyannote". Per-config `diarization_backend` overrides this.
     diarization_backend: str = "sortformer"
     patreon_cookie: str = ""
-    anthropic_key: str = ""
 
 
 # Recognised diarization backend names (see benchmarks/diarization/NOTES.md).
@@ -377,10 +376,6 @@ def get_global_config() -> GlobalConfig:
     patreon_cookie_path = config_root / 'tokens' / 'patreon'
     if patreon_cookie_path.exists():
         patreon_cookie = patreon_cookie_path.read_text(encoding='utf-8').strip()
-    anthropic_key = ""
-    anthropic_key_path = config_root / 'tokens' / 'anthropic'
-    if anthropic_key_path.exists():
-        anthropic_key = anthropic_key_path.read_text(encoding='utf-8').strip()
     # Propagate HF token to env for libraries (e.g., pyannote) that read from HF_TOKEN/HUGGINGFACE_TOKEN.
     if hf_token:
         os.environ.setdefault("HF_TOKEN", hf_token)
@@ -405,7 +400,6 @@ def get_global_config() -> GlobalConfig:
         project_root=config_root,
         diarization_backend=backend_normalized,
         patreon_cookie=patreon_cookie,
-        anthropic_key=anthropic_key,
     )
 
 
