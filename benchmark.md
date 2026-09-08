@@ -1,13 +1,20 @@
-# Diarization backend benchmark
+# Pipeline benchmarks
+
+Host-neutral summary of the efficiency-pass measurements — this file is the
+public summary; the harnesses live in `benchmarks/` and regenerate the detailed
+per-file tables locally (some hold verbatim transcript text and stay untracked).
+
+Two reports so far: **diarization backend** (pyannote → streaming Sortformer) and
+**transcription compute type** (float16 → int8_float16).
+
+---
+
+## Diarization backend
 
 Why the pipeline diarizes with **streaming Sortformer** (NeMo) by default instead
 of pyannote, and what the trade-off is.
 
-Full working notes, per-file tables and the harness live in
-[`benchmarks/diarization/NOTES.md`](benchmarks/diarization/NOTES.md). This file is
-the summary.
-
-## TL;DR
+### TL;DR
 
 | | pyannote 3.1 (old default) | streaming Sortformer + CallHome post-proc (new default) |
 |---|---|---|
@@ -24,7 +31,7 @@ the summary.
 config flag away for the rare show that genuinely needs more than four
 simultaneous speakers separated.
 
-## What was compared
+### What was compared
 
 - **pyannote** — `pyannote/speaker-diarization-3.1` (via whisperx), the previous
   default. Clustering-based, no speaker limit.
@@ -39,7 +46,7 @@ The Sortformer / clustering backends run in an isolated environment
 (`tools/nemo_diarize/`, NeMo pins conflicting torch/numpy versions) and are
 invoked as a subprocess. See NOTES.md for setup.
 
-## Test set
+### Test set
 
 8 files, **~12 hours** of audio, 16 kHz mono, drawn from what the pipeline
 actually has on disk (so a mix of lossy and lossless codecs). Chosen to span the
@@ -63,9 +70,9 @@ There is **no ground-truth diarization** for this audio, so "accuracy" here mean
 manual spot-checks plus agreement/disagreement between backends, not a DER score
 against a reference.
 
-## Results
+### Results
 
-### Speed
+#### Speed
 
 Over the full ~12 h sample, one file at a time, on a single consumer GPU:
 
@@ -80,7 +87,7 @@ Over the full ~12 h sample, one file at a time, on a single consumer GPU:
 Speed alone doesn't decide it — pyannote is already fast enough. Streaming
 Sortformer only wins if it's also *cleaner*.
 
-### Speaker counting
+#### Speaker counting
 
 pyannote's speaker count is deliberately uncapped, and on real content that means
 every bit of non-primary audio — intro music, a phone caller, an inserted clip —
@@ -108,14 +115,14 @@ wrong for a 15-person call. For this pipeline's downstream steps (transcript,
 topic and stance tagging, matching the host voice) a small stable roster is more
 useful than dozens of one-off fragments.
 
-### Segmentation quality
+#### Segmentation quality
 
 pyannote's raw output is choppy — sub-second median segment length on the busier
 files, with words frequently clipped at segment boundaries. Streaming Sortformer
 with conversational post-processing produces **40–55 % fewer segments** covering
 the same speech, with turn boundaries that line up with actual pauses.
 
-### Long audio
+#### Long audio
 
 - pyannote handled 10-hour files (~53× realtime) but returned **55–135 speaker
   labels** — every clip and caller its own label.
@@ -124,13 +131,13 @@ the same speech, with turn boundaries that line up with actual pauses.
   that threshold; a 7.5 h file then diarizes in ~2 min. Output stays at 4
   speakers.
 
-### Stability over time
+#### Stability over time
 
 On a 2-hour+ interview, the streaming model's per-5-minute speaker assignment
 matches pyannote's window by window — no label swaps, no identity drift. Its
 arrival-order speaker cache holds identities across the whole file.
 
-## Tuning
+### Tuning
 
 The streaming model ships with a low-latency real-time preset and no
 post-processing. For offline batch use both are wrong. Two changes:
@@ -146,12 +153,12 @@ reassigns a speaker (speaker-confusion between the tuned and untuned runs is
 zero). The tuned config is the only one that gets both clean interviews down to
 exactly 2 speakers.
 
-## Downstream impact
+### Downstream impact
 
 The point of diarization here is to feed transcription and classification, so the
 comparison that matters is what those steps produce from each backend's segments.
 
-### Transcription
+#### Transcription impact
 
 One ASR call per segment. Fewer, cleaner segments →
 
@@ -165,7 +172,7 @@ One ASR call per segment. Fewer, cleaner segments →
   speech and garbled 1–2 s soundbite fragments — its value is genuinely
   ambiguous.
 
-### Classification (topic / stance tagging)
+#### Classification impact (topic / stance tagging)
 
 The classifier only sees segments that pass a keyword pre-filter and a minimum
 duration. Running it over both transcripts of an interview and a busy stream:
@@ -185,7 +192,7 @@ differ between the two, but that's the language model reacting to
 differently-chunked context, not one backend systematically missing content;
 neither set is clearly better and the sample is small.
 
-## The catch: 4-speaker ceiling
+### The catch: 4-speaker ceiling
 
 Streaming Sortformer separates **at most 4 speakers**. This is structural — the
 model's published error rate rises sharply past 4. For content with more than
@@ -200,7 +207,7 @@ For this project that's an acceptable default because:
   audio is what the host-matching step already flags as unknown.
 - The rare show that needs it can opt back into pyannote per-config.
 
-## How to choose the backend
+### How to choose the backend
 
 Default is set in `confs/global.json`:
 
@@ -219,7 +226,7 @@ post-processing) and `"pyannote"`. Missing / unset falls back to the global
 default. If the NeMo environment or model files aren't present, the pipeline logs
 a warning and uses pyannote.
 
-## Rejected options
+### Rejected options
 
 - **Sortformer offline** — cannot process anything longer than a short clip.
 - **NeMo clustering** — 5–7× slower than pyannote *and* no better on speaker
@@ -230,3 +237,46 @@ a warning and uses pyannote.
 - **A voice-activity tripwire that re-runs pyannote when Sortformer looks like
   it's under-attributing speech** — held in reserve; the classification results
   suggest it isn't needed.
+
+---
+
+## Transcription: Whisper compute type
+
+CTranslate2 (faster-whisper's backend) can run the model weights at different
+precisions. The pipeline was on `float16`; `int8_float16` was only a crash-retry
+fallback. Question: make `int8_float16` the default?
+
+Model: `Systran/faster-distil-whisper-large-v3`, batched, on the same 12 h sample,
+transcribing the streaming-Sortformer segments. `float16` is the reference — there
+is no ground truth, so "drift" below is distance *from float16*, not error.
+
+### Result
+
+| compute type | wall (12 h audio) | throughput | vs float16 |
+| --- | --: | --: | --: |
+| float16 | 679 s | ~65× realtime | — |
+| **int8_float16** | **633 s** | **~70× realtime** | **1.07× faster** |
+
+~7 % faster, consistently across every file, and lower VRAM.
+
+**Transcript drift: ~2.5 % of words**, and spot-checking every changed row it is
+**noise, not content loss**:
+
+- alternate spellings of proper nouns and jargon that are *already* ASR guesses
+  in both versions (the model invents a spelling either way — neither is "right");
+- punctuation and sentence-boundary differences;
+- disfluency rendering — `int8_float16` often captures *more* of a stammer;
+- unintelligible crowd/chant audio, where neither transcript is meaningful (this
+  is the whole reason one noisy file shows 6 % drift — short garbage rows inflate
+  the ratio).
+
+No dropped sentences, no flipped meaning. On clean speech `int8_float16` was
+occasionally *more* accurate ("court reporter" vs "poor reporter").
+
+### Decision
+
+`int8_float16` is the GPU default (`src/transcribe.py`). Overrides:
+
+- `INTENSION_TRANSCRIBE_COMPUTE_TYPE=float16` — previous behaviour
+- `INTENSION_TRANSCRIBE_COMPUTE_TYPE=float32` — full precision
+- `INTENSION_GPU_SAFE_MODE=1` — drops to plain `int8` (the native-crash retry path)

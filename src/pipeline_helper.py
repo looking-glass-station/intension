@@ -33,7 +33,7 @@ def run_script(script_path):
     result = subprocess.run([python_exe, str(script_path)])
     transcribe_crash_codes = {3221226505, -1073740791}
     if label == "transcribe" and result.returncode in transcribe_crash_codes:
-        print("transcribe crashed natively (0xC0000409); retrying once on GPU safe mode (int8_float16)")
+        print("transcribe crashed natively (0xC0000409); retrying once on GPU safe mode (int8)")
         retry_env = os.environ.copy()
         retry_env["INTENSION_GPU_SAFE_MODE"] = "1"
         result = subprocess.run([python_exe, str(script_path)], env=retry_env)

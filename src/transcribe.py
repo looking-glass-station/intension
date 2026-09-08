@@ -81,7 +81,21 @@ class Transcriber:
             "1", "true", "yes", "on"
         }
         use_cuda = is_cuda and not force_cpu
-        compute_type = "int8_float16" if (use_cuda and safe_gpu_mode) else ("float16" if use_cuda else "float32")
+        # int8_float16 is the GPU default: benchmarked ~7% faster than float16 over
+        # the 12 h sample with only spelling/punctuation-level drift (no lost content)
+        # and lower VRAM. See benchmarks/transcription/compare_compute_type.md.
+        # Safe mode drops further to plain int8 for the native-crash retry
+        # (src/pipeline_helper.py). INTENSION_TRANSCRIBE_COMPUTE_TYPE overrides
+        # everything (e.g. "float16" for the old behaviour, "float32" for full precision).
+        override = os.environ.get("INTENSION_TRANSCRIBE_COMPUTE_TYPE", "").strip()
+        if override:
+            compute_type = override
+        elif not use_cuda:
+            compute_type = "float32"
+        elif safe_gpu_mode:
+            compute_type = "int8"
+        else:
+            compute_type = "int8_float16"
         device = "cuda" if use_cuda else "cpu"
         return WhisperModel(
             self.MODEL_ID,
