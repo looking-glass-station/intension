@@ -4,8 +4,11 @@ Host-neutral summary of the efficiency-pass measurements — this file is the
 public summary; the harnesses live in `benchmarks/` and regenerate the detailed
 per-file tables locally (some hold verbatim transcript text and stay untracked).
 
-Two reports so far: **diarization backend** (pyannote → streaming Sortformer) and
-**transcription compute type** (float16 → int8_float16).
+Reports so far:
+
+- **diarization backend** — pyannote → streaming Sortformer
+- **transcription compute type** — float16 → int8_float16
+- **speaker-labeling device** — GPU → CPU voice encoder
 
 ---
 
@@ -280,3 +283,35 @@ occasionally *more* accurate ("court reporter" vs "poor reporter").
 - `INTENSION_TRANSCRIBE_COMPUTE_TYPE=float16` — previous behaviour
 - `INTENSION_TRANSCRIBE_COMPUTE_TYPE=float32` — full precision
 - `INTENSION_GPU_SAFE_MODE=1` — drops to plain `int8` (the native-crash retry path)
+
+---
+
+## Speaker labeling: run the voice encoder on CPU
+
+The host-matching step (`label_speakers.py`) embeds every diarized segment with a
+small speaker-embedding model (resemblyzer's `VoiceEncoder` — a 3-layer LSTM) and
+cosine-matches each speaker against the known host voiceprint. It ran the model on
+GPU with 2 worker threads.
+
+**The GPU is the wrong device for this model.** Per short segment the LSTM does a
+trivial amount of compute, so the GPU spends its time on kernel launches and
+host↔device copies — and it becomes a serialization point that caps the
+file-level threading at ~1.2×, no matter how many workers.
+
+Benchmarked over the sample (wall time for the whole stage):
+
+| device | 2 workers | 4 workers | 8 workers |
+| --- | --: | --: | --: |
+| GPU | 61.5 s | 60.7 s | 60.4 s |
+| **CPU** | 34.6 s | **32.9 s** | 35.8 s |
+
+On CPU the mel-spectrogram (already computed on CPU) feeds straight into the LSTM
+with no transfer, it's **~1.8× faster**, and *then* the threads scale — up to
+about 4, past which NumPy's own per-task threading oversubscribes.
+
+Host-label assignments are **identical** between GPU and CPU and across every
+worker count.
+
+**Decision:** CPU encoder, 4 workers (`src/label_speakers.py`). Whole-stage
+before/after on the sample: **62.5 s → 34.8 s**. `INTENSION_LABEL_SPEAKERS_DEVICE=cuda`
+forces the GPU path back on.

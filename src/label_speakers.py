@@ -167,7 +167,14 @@ def label_speakers(
 
 
 def main():
-    encoder = VoiceEncoder()
+    # resemblyzer's VoiceEncoder is a tiny 3-layer LSTM. Per short segment the GPU
+    # is all kernel-launch + host<->device copy overhead, and it serialises the
+    # per-file threads. On CPU it's ~1.8x faster over the sample and the mel
+    # spectrogram (already CPU/librosa) feeds straight in - host labels come out
+    # identical. See benchmarks/transcription/NOTES.md.
+    # INTENSION_LABEL_SPEAKERS_DEVICE=cuda forces the GPU path back on.
+    encoder_device = os.environ.get("INTENSION_LABEL_SPEAKERS_DEVICE", "cpu").strip() or "cpu"
+    encoder = VoiceEncoder(device=encoder_device)
     global_config = get_global_config()
 
     for cfg in iter_processing_configs(include_manual=True):
@@ -275,7 +282,11 @@ def main():
             ten_percent_ticks=True,
         )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=system_config.max_workers(1)) as executor:
+        # ~4 is this stage's sweet spot: the per-file work is mel-spectrogram +
+        # tiny-LSTM throughput, not core-bound, and numpy already threads each
+        # task - 8+ workers flat-lines or regresses. (benchmarks/transcription/NOTES.md)
+        label_workers = system_config.max_workers(absolute_count=4)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=label_workers) as executor:
             futures = {
                 executor.submit(label_speakers, *args): args[1]  # transcript_file
                 for args in files_to_label
