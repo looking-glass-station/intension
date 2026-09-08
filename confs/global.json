@@ -13,5 +13,5 @@
     "target_file_count": 20,
     "overlap_tolerance": 0.25
   },
-  "diarization_backend_nemo": true
+  "diarization_backend": "sortformer"
 }

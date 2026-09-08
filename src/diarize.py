@@ -2,7 +2,9 @@ import contextlib
 import io
 import inspect
 import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional, List, Dict
 
@@ -12,9 +14,23 @@ from whisperx.diarize import DiarizationPipeline
 from pyannote.audio import Pipeline
 
 import system_config
-from configs import get_global_config, iter_processing_configs
+from configs import get_global_config, iter_processing_configs, resolve_diarization_backend
 from file_utils import filter_files_by_stems, audacity_writer
 from logger import global_logger
+
+# Isolated NeMo env for the Sortformer streaming backend (see tools/nemo_diarize/
+# and benchmarks/diarization/NOTES.md). NeMo force-upgrades torch/transformers, so
+# it can't share this env - it runs as a subprocess.
+NEMO_DIR = Path(__file__).resolve().parent.parent / "tools" / "nemo_diarize"
+NEMO_SCRIPT = NEMO_DIR / "nemo_diarize.py"
+NEMO_MODEL = NEMO_DIR / "models" / "diar_streaming_sortformer_4spk-v2.1.nemo"
+# Tuned config from Phase 2: high-latency streaming preset + CallHome post-processing.
+NEMO_SORTFORMER_ARGS = ["--mode", "sortformer-streaming", "--postprocessing", "callhome"]
+
+
+def _nemo_python() -> Optional[Path]:
+    py = NEMO_DIR / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return py if py.exists() else None
 
 
 class Diarizer:
@@ -29,6 +45,7 @@ class Diarizer:
         self.short_segment_seconds = self._env_float("INTENSION_SHORT_DIARIZATION_SEGMENT_SECONDS", 1.0)
         self.merge_gap_seconds = self._env_float("INTENSION_DIARIZATION_MERGE_GAP_SECONDS", 0.5)
         self.model = None
+        self.default_backend = resolve_diarization_backend()
 
     def _ensure_model(self) -> None:
         if self.model is None:
@@ -149,7 +166,119 @@ class Diarizer:
             raise
 
 
-    def diarize_file(self, wav_file: Path, output_dir: Path = None, host_count: Optional[int] = None):
+    @staticmethod
+    def _parse_rttm_file(rttm_path: Path) -> List[Dict[str, float]]:
+        """
+        Parse an RTTM into start/end/label dicts. Parsed from the right because
+        NeMo writes unescaped spaces into the file id.
+        """
+        segments: List[Dict[str, float]] = []
+        for line in rttm_path.read_text(encoding="utf-8").splitlines():
+            p = line.split()
+            if len(p) >= 10 and p[0] == "SPEAKER":
+                start, dur, label = float(p[-7]), float(p[-6]), p[-3]
+                segments.append({"start": start, "end": start + dur, "label": label})
+        return segments
+
+    def _finalize_segments(
+            self,
+            wav_file: Path,
+            rttm_path: Path,
+            audacity_path: Path,
+            segments: List[Dict[str, float]],
+    ) -> None:
+        raw_segment_count = len(segments)
+        segments = self._merge_short_adjacent_segments(segments)
+        merged_segment_count = len(segments)
+        if merged_segment_count < raw_segment_count:
+            self.logger.info(
+                f"Merged adjacent short diarization segments for {wav_file.name}: "
+                f"{raw_segment_count} -> {merged_segment_count} "
+                f"(short<={self.short_segment_seconds:.2f}s, gap<={self.merge_gap_seconds:.2f}s)"
+            )
+        self._write_rttm_and_audacity(rttm_path, audacity_path, wav_file.name, segments)
+        self.logger.info(f"Diarized: {wav_file.name}")
+
+    def _sortformer_available(self) -> bool:
+        py = _nemo_python()
+        if py is None or not NEMO_SCRIPT.exists():
+            return False
+        return NEMO_MODEL.exists()
+
+    def _resolve_backend(self, backend: Optional[str]) -> str:
+        backend = (backend or self.default_backend or "pyannote").lower()
+        if backend == "sortformer" and not self._sortformer_available():
+            self.logger.warning(
+                "diarization_backend=sortformer but the NeMo env/model is missing "
+                f"({NEMO_DIR}); falling back to pyannote."
+            )
+            return "pyannote"
+        return backend
+
+    def _run_nemo_sortformer(self, wav_files: List[Path], staging_dir: Path) -> Dict[str, Path]:
+        """
+        Run the Sortformer streaming worker over wav_files in one subprocess.
+        Returns a {stem: staged_rttm_path} map for files it produced.
+        """
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = staging_dir / "_summary.json"
+        cmd = [
+            str(_nemo_python()), str(NEMO_SCRIPT),
+            *NEMO_SORTFORMER_ARGS,
+            "--out-dir", str(staging_dir),
+            "--json-out", str(summary_path),
+            "--device", "auto",
+            "--audio", *[str(p) for p in wav_files],
+        ]
+        env = {**os.environ, "HF_HUB_OFFLINE": "1"}
+        self.logger.info(
+            f"Running NeMo Sortformer worker over {len(wav_files)} file(s) "
+            f"(one process; NeMo import ~2 min)"
+        )
+        proc = subprocess.run(cmd, env=env)
+        produced: Dict[str, Path] = {}
+        for wav in wav_files:
+            staged = staging_dir / f"{wav.stem}.rttm"
+            if staged.exists():
+                produced[wav.stem] = staged
+            else:
+                self.logger.error(
+                    f"NeMo Sortformer produced no RTTM for {wav.name} (rc={proc.returncode})"
+                )
+        return produced
+
+    # Cap wavs per NeMo subprocess: keeps the argv well under the Windows command
+    # line limit; the ~2 min model load is re-paid per chunk (rare batch is >50).
+    NEMO_BATCH_CHUNK = 50
+
+    def _diarize_sortformer_batch(self, jobs: List[tuple]) -> List[Path]:
+        """
+        jobs: list of (wav_file, output_dir). Runs the NeMo subprocess over the
+        group (chunked), then distributes + finalizes each RTTM. Returns wavs left
+        undone (worker failure) so the caller can fall back to pyannote.
+        """
+        undone: List[Path] = []
+        for i in range(0, len(jobs), self.NEMO_BATCH_CHUNK):
+            chunk = jobs[i:i + self.NEMO_BATCH_CHUNK]
+            with tempfile.TemporaryDirectory(prefix="intension_sortformer_") as tmp:
+                staging = Path(tmp)
+                produced = self._run_nemo_sortformer([w for w, _ in chunk], staging)
+                for wav_file, output_dir in chunk:
+                    staged = produced.get(wav_file.stem)
+                    if staged is None:
+                        undone.append(wav_file)
+                        continue
+                    rttm_path = output_dir / "rttm" / f"{wav_file.stem}.rttm"
+                    audacity_path = output_dir / "audacity_labels" / f"{wav_file.stem}.txt"
+                    rttm_path.parent.mkdir(parents=True, exist_ok=True)
+                    audacity_path.parent.mkdir(parents=True, exist_ok=True)
+                    self._finalize_segments(
+                        wav_file, rttm_path, audacity_path, self._parse_rttm_file(staged)
+                    )
+        return undone
+
+    def diarize_file(self, wav_file: Path, output_dir: Path = None, host_count: Optional[int] = None,
+                     backend: Optional[str] = None):
         """
         Diarizes a wav file and writes RTTM and Audacity label files.
         """
@@ -168,6 +297,13 @@ class Diarizer:
         if rttm_path.exists() and audacity_path.exists():
             self.logger.info(f"Diarizing skipped: {rttm_path.name}")
             return
+
+        resolved = self._resolve_backend(backend)
+        if resolved == "sortformer":
+            undone = self._diarize_sortformer_batch([(wav_file, output_dir)])
+            if not undone:
+                return
+            self.logger.warning(f"Sortformer failed for {wav_file.name}; using pyannote")
 
         # dont do this, too many hosts use random clips
         #max_speakers = host_count + 2 if host_count is not None else None
@@ -188,18 +324,7 @@ class Diarizer:
             }
             for _, row in diarize_df.iterrows()
         ]
-        raw_segment_count = len(segments)
-        segments = self._merge_short_adjacent_segments(segments)
-        merged_segment_count = len(segments)
-        if merged_segment_count < raw_segment_count:
-            self.logger.info(
-                f"Merged adjacent short diarization segments for {wav_file.name}: "
-                f"{raw_segment_count} -> {merged_segment_count} "
-                f"(short<={self.short_segment_seconds:.2f}s, gap<={self.merge_gap_seconds:.2f}s)"
-            )
-
-        self._write_rttm_and_audacity(rttm_path, audacity_path, wav_file.name, segments)
-        self.logger.info(f"Diarized: {wav_file.name}")
+        self._finalize_segments(wav_file, rttm_path, audacity_path, segments)
 
     def batch(self):
         """
@@ -235,19 +360,33 @@ class Diarizer:
                 print(f"No files to diarize for: {cfg_name} ({cfg_id})")
                 continue
 
+            backend = self._resolve_backend(getattr(cfg, "diarization_backend", None))
+
             bar = progress.progress_bar(
                 wav_files,
                 total=len(wav_files),
-                desc=f"{cfg_name} ({cfg_id}): Diarizing",
+                desc=f"{cfg_name} ({cfg_id}): Diarizing ({backend})",
                 unit="file",
                 leave=True,
                 ten_percent_ticks=True,
             )
 
-            for wav_file in wav_files:
-                bar.set_description(f"{cfg_name} ({cfg_id}): {wav_file.stem}")
-                self.diarize_file(wav_file, channel_data_dir, host_count=len(cfg.hosts))
-                bar.update(1)
+            if backend == "sortformer":
+                # One NeMo subprocess for the whole config (import alone costs ~2 min).
+                jobs = [(wav_file, channel_data_dir) for wav_file in wav_files]
+                undone = self._diarize_sortformer_batch(jobs)
+                bar.update(len(wav_files) - len(undone))
+                for wav_file in undone:
+                    bar.set_description(f"{cfg_name} ({cfg_id}): {wav_file.stem} (pyannote)")
+                    self.diarize_file(wav_file, channel_data_dir,
+                                      host_count=len(cfg.hosts), backend="pyannote")
+                    bar.update(1)
+            else:
+                for wav_file in wav_files:
+                    bar.set_description(f"{cfg_name} ({cfg_id}): {wav_file.stem}")
+                    self.diarize_file(wav_file, channel_data_dir,
+                                      host_count=len(cfg.hosts), backend=backend)
+                    bar.update(1)
 
             bar.close()
 

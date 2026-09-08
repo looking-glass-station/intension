@@ -60,6 +60,7 @@ class YouTubeConfig:
     must_exclude: List[str]
     hosts: List[str]
     no_transcript: bool = False
+    diarization_backend: Optional[str] = None  # "sortformer" | "pyannote"; None = global default
 
     # Computed, not serialized
     host_embeddings: List[HostEmbedding] = field(
@@ -132,6 +133,7 @@ class TwitchConfig:
     must_exclude: List[str]
     hosts: List[str]
     no_transcript: bool = False
+    diarization_backend: Optional[str] = None  # "sortformer" | "pyannote"; None = global default
 
     # Computed, not serialized
     host_embeddings: List[HostEmbedding] = field(
@@ -195,6 +197,7 @@ class ManualConfig:
     channel_name_or_term: str
     hosts: List[str]
     no_transcript: bool = False
+    diarization_backend: Optional[str] = None  # "sortformer" | "pyannote"; None = global default
     input_path: Optional[Path] = None
     output_path: Optional[Path] = None
     host_embeddings: List[HostEmbedding] = field(default_factory=list)
@@ -219,6 +222,7 @@ class PatreonConfig:
     must_exclude: List[str]
     hosts: List[str]
     no_transcript: bool = False
+    diarization_backend: Optional[str] = None  # "sortformer" | "pyannote"; None = global default
     url: Optional[str] = None
     campaign_id: Optional[str] = None
 
@@ -292,9 +296,45 @@ class GlobalConfig:
     hf_token: str
     log_dir: Path
     project_root: Path
-    diarization_backend: Optional[str] = None
-    diarization_backend_nemo: bool = False
+    # Default diarization backend: "sortformer" (NeMo streaming, via tools/nemo_diarize)
+    # or "pyannote". Per-config `diarization_backend` overrides this.
+    diarization_backend: str = "sortformer"
     patreon_cookie: str = ""
+    anthropic_key: str = ""
+
+
+# Recognised diarization backend names (see benchmarks/diarization/NOTES.md).
+DIARIZATION_BACKENDS = {"sortformer", "pyannote"}
+_DEFAULT_DIARIZATION_BACKEND = "sortformer"
+
+
+def normalize_diarization_backend(value: Any) -> Optional[str]:
+    """
+    Map a raw config value to a known backend name, or None if unset/unrecognised.
+    Accepts bools for backwards compat with the old `diarization_backend_nemo` flag.
+    """
+    if isinstance(value, bool):
+        return "sortformer" if value else "pyannote"
+    if isinstance(value, str):
+        val = value.strip().lower()
+        if val in DIARIZATION_BACKENDS:
+            return val
+        if val in {"nemo", "sf", "sf-stream", "sortformer-streaming"}:
+            return "sortformer"
+    return None
+
+
+def resolve_diarization_backend(cfg: Any = None) -> str:
+    """
+    Resolve the effective diarization backend for a processing config: the config's
+    own `diarization_backend` if set, else the global default.
+    """
+    if cfg is not None:
+        per_cfg = normalize_diarization_backend(getattr(cfg, "diarization_backend", None))
+        if per_cfg:
+            return per_cfg
+    gc_backend = normalize_diarization_backend(get_global_config().diarization_backend)
+    return gc_backend or _DEFAULT_DIARIZATION_BACKEND
 
 
 def get_global_config() -> GlobalConfig:
@@ -337,18 +377,19 @@ def get_global_config() -> GlobalConfig:
     patreon_cookie_path = config_root / 'tokens' / 'patreon'
     if patreon_cookie_path.exists():
         patreon_cookie = patreon_cookie_path.read_text(encoding='utf-8').strip()
+    anthropic_key = ""
+    anthropic_key_path = config_root / 'tokens' / 'anthropic'
+    if anthropic_key_path.exists():
+        anthropic_key = anthropic_key_path.read_text(encoding='utf-8').strip()
     # Propagate HF token to env for libraries (e.g., pyannote) that read from HF_TOKEN/HUGGINGFACE_TOKEN.
     if hf_token:
         os.environ.setdefault("HF_TOKEN", hf_token)
         os.environ.setdefault("HUGGINGFACE_TOKEN", hf_token)
     log_dir = config_root / 'logs'
-    backend_raw = raw.get('diarization_backend')
-    backend_normalized: Optional[str] = None
-    if isinstance(backend_raw, str):
-        backend_normalized = backend_raw.strip().lower() or None
-    elif isinstance(backend_raw, bool):
-        backend_normalized = "nemo" if backend_raw else "pyannote"
-    backend_nemo_flag = _coerce_bool(raw.get('diarization_backend_nemo', False))
+    # Back-compat: honour the retired `diarization_backend_nemo` bool if `diarization_backend`
+    # is absent.
+    backend_raw = raw.get('diarization_backend', raw.get('diarization_backend_nemo'))
+    backend_normalized = normalize_diarization_backend(backend_raw) or _DEFAULT_DIARIZATION_BACKEND
 
     return GlobalConfig(
         data_directory=data,
@@ -363,8 +404,8 @@ def get_global_config() -> GlobalConfig:
         log_dir=log_dir,
         project_root=config_root,
         diarization_backend=backend_normalized,
-        diarization_backend_nemo=backend_nemo_flag,
         patreon_cookie=patreon_cookie,
+        anthropic_key=anthropic_key,
     )
 
 
