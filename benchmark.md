@@ -315,3 +315,51 @@ worker count.
 **Decision:** CPU encoder, 4 workers (`src/label_speakers.py`). Whole-stage
 before/after on the sample: **62.5 s → 34.8 s**. `INTENSION_LABEL_SPEAKERS_DEVICE=cuda`
 forces the GPU path back on.
+
+---
+
+## Bias classification: model size and batch concurrency
+
+The bias detector (`bias.py`) sends keyword-pre-filtered transcript segments to a
+local LLM via Ollama for structured classification (topic / stance / target /
+score). Two questions: can a smaller model do it, and can the batches run
+concurrently?
+
+### Concurrency: no
+
+Firing the per-batch `ollama.chat` calls through a thread pool gave **1.0× at
+1/2/3/4 workers** — completely flat. The Ollama server runs with
+`OLLAMA_NUM_PARALLEL=1`, so requests serialise no matter how many threads submit
+them. A client-side thread pool can't change that; the lever is server-side, and
+raising it needs VRAM headroom the 12B model doesn't leave on a 16 GB card. (One
+fix landed regardless: the classifier now runs at `temperature=0`, so findings
+are reproducible instead of resampling on every run.)
+
+### Model size: keep the 12B
+
+Evaluated `qwen2.5:7b` and `llama3.1:8b` against the current `gemma3:12b` over the
+same pre-filtered segments (temperature 0), scoring agreement on which segments
+each flags and with what topic/stance:
+
+| model | speed vs 12B | findings vs 12B's 31 | agreement (shared / 12B-only / model-only) |
+| --- | --: | --: | --- |
+| gemma3:12b | — | 31 | reference |
+| qwen2.5:7b | ~2× faster | 32 | 16 / 15 / 16 |
+| llama3.1:8b | ~2.7× slower | 184 | 22 / 9 / 153 |
+
+Neither is usable:
+
+- **llama3.1:8b** floods — 6× the findings, and they're wrong: it tags Holocaust
+  remembrance and WWII history as antisemitism, sociological observations as
+  racism, and once flagged a complaint about a TV show as anti-LGBTQ+ bias.
+- **qwen2.5:7b** matches the finding *count* but only half are the same calls,
+  and it fails the prompt's core distinctions: it flipped a segment expressing
+  *compassion for a national group* from positive to "negative bias", tagged a
+  personal insult ("X is a spineless piece of shit") as group racism, and
+  mislabelled a comment about sexism as racism.
+
+The keyword pre-filter narrows the *topic*, but the judgment that's left — is this
+segment actually biased, or just discussing a charged subject; is it aimed at a
+person or a group; is the speaker endorsing a view or reporting it — is exactly
+where the smaller models break down. The 12B's extra capacity is buying real
+accuracy on the hard cases. `gemma3:12b` stays the default.
