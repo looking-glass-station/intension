@@ -11,6 +11,7 @@ Reports so far:
 - **transcription compute type** — float16 → int8_float16
 - **speaker-labeling device** — GPU → CPU voice encoder
 - **bias classification** — model size + batch concurrency
+- **prosody** — new vocal-aggression stage (SER model choice open)
 
 ---
 
@@ -365,3 +366,35 @@ segment actually biased, or just discussing a charged subject; is it aimed at a
 person or a group; is the speaker endorsing a view or reporting it — is exactly
 where the smaller models break down. The 12B's extra capacity is buying real
 accuracy on the hard cases. `gemma3:12b` stays the default.
+
+---
+
+## Prosody: vocal-aggression detection
+
+`prosody.py` is a new stage that scores every diarized segment for aggressive
+delivery **from the audio alone** — independent of what words are used
+(`invective.py`) or what topic is discussed (`bias.py`). A raised, hostile
+delivery with no slur and no topic keyword was previously invisible to the whole
+pipeline.
+
+- **Tier 1 — DSP, ~free.** One STFT per file → per-segment RMS energy, peak
+  loudness, spectral centroid, speaking rate, each converted to a
+  **speaker-relative z-score** (loud/bright/fast *for this person*, so mic gain
+  and per-speaker baselines cancel out). ~5 s for a 30-minute file. Catches
+  shouting / raised voice on its own.
+- **Tier 2 — speech-emotion model** on the Tier-1 shortlist plus a random
+  control set. `audeering/wav2vec2` gives continuous arousal / dominance /
+  valence; aggression ≈ high arousal + high dominance + low valence. This is what
+  separates genuine hostility from merely loud — hype, laughter and dramatic
+  reads all spike arousal without being aggressive.
+
+Output is the **complete** per-segment record (`prosody/<video>.csv`), not just
+flagged rows, plus an Audacity label track for segments over threshold.
+
+**Open question — the Tier-2 model and thresholds need a listen-through.** On a
+first sample, `audeering`'s dimensional scores and a second model
+(`superb/wav2vec2-base-superb-er`, IEMOCAP anger) disagree substantially on
+individual clips — one rates a quiet segment 0.94 "angry" that the other rates
+calm, and vice-versa. `benchmarks/bench_prosody.py` extracts the candidate clips
+and builds a table to fill in by ear; `confs/prosody.json`'s weights and
+thresholds should be set against that, not trusted blind.
