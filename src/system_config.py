@@ -1,5 +1,4 @@
 import os
-import sys
 from pathlib import Path
 
 import torch  # noqa: E402  (torch first, so it binds its own bundled cuDNN 9)
@@ -10,24 +9,25 @@ os.environ['OMP_NUM_THREADS'] = str(os.cpu_count())
 os.environ['LOKY_MAX_CPU_COUNT'] = str(os.cpu_count())
 
 
-def _add_ctranslate2_cudnn8() -> None:
+def _add_ctranslate2_cuda_libs() -> None:
     """
-    ctranslate2 4.4.0 (faster-whisper's backend, CUDA 11) needs cuDNN 8, but
-    torch 2.5.1+cu118 only bundles cuDNN 9. Put the nvidia-cudnn-cu11 (8.9.x)
-    DLLs on the search path *after* torch has loaded, so only ctranslate2 - which
-    imports later - picks them up.
+    ctranslate2 4.4.0 (faster-whisper's backend) is a CUDA 12 build: it needs
+    cuBLAS 12 + cuDNN 8. torch 2.5.1+cu118 only bundles CUDA 11 cuBLAS and
+    cuDNN 9. Put nvidia-{cublas,cudnn}-cu12's DLLs on the search path *after*
+    torch has loaded, so only ctranslate2 - which imports later - binds them.
+    Windows only; a no-op elsewhere (Linux ctranslate2 wheels bundle their libs).
     """
     if os.name != "nt":
         return
-    for base in {Path(p) for p in sys.path if p} | {Path(torch.__file__).resolve().parents[1]}:
-        d = base / "nvidia" / "cudnn" / "bin"
+    site = Path(torch.__file__).resolve().parents[1]
+    for sub in ("cublas", "cudnn"):
+        d = site / "nvidia" / sub / "bin"
         if d.is_dir():
             os.add_dll_directory(str(d))
             os.environ["PATH"] = f"{d}{os.pathsep}{os.environ.get('PATH', '')}"
-            return
 
 
-_add_ctranslate2_cudnn8()
+_add_ctranslate2_cuda_libs()
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 torch_device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
