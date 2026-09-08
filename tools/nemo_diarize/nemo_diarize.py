@@ -50,6 +50,20 @@ CLUSTER_CONF = {
 VAD_NEMO = MODEL_DIR / "vad_multilingual_marblenet.nemo"
 SPK_NEMO = MODEL_DIR / "titanet-l.nemo"
 
+# streaming Sortformer chunking, in 80 ms frames (from the v2.1 model card).
+# "high" = the 30.4 s-latency preset: for offline batch it is both faster (RTF
+# ~0.002) and 1-2 DER points better than the low-latency preset.
+SF_STREAM_PRESETS = {
+    "high": dict(chunk_len=340, chunk_right_context=40, fifo_len=40,
+                 spkcache_update_period=300, spkcache_len=188),
+    "low": dict(chunk_len=6, chunk_right_context=7, fifo_len=188,
+                spkcache_update_period=144, spkcache_len=188),
+}
+POST_PROC = {  # name -> yaml under conf/post_processing/
+    "callhome": "diar_streaming_sortformer_4spk-v2_callhome-part1.yaml",
+    "dihard3": "diar_streaming_sortformer_4spk-v2_dihard3-dev.yaml",
+}
+
 
 def load_sortformer(mode: str):
     """Prefer a local .nemo; fall back to HF (which is unreliable on this box)."""
@@ -120,12 +134,21 @@ def read_rttm(path: Path) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
-def run_sortformer(mode: str, audio: list[Path], out_dir: Path, device: str, batch_size: int):
+def run_sortformer(mode, audio, out_dir, device, batch_size, *,
+                   sf_latency="high", postprocessing="none"):
     import torch
 
     t0 = time.perf_counter()
     model, model_src = load_sortformer(mode)
     model.eval().to(device)
+
+    streaming = mode == "sortformer-streaming"
+    if streaming:
+        for k, v in SF_STREAM_PRESETS[sf_latency].items():
+            setattr(model.sortformer_modules, k, v)
+        model.sortformer_modules._check_streaming_parameters()
+    pp_yaml = str(CONF_DIR / "post_processing" / POST_PROC[postprocessing]) \
+        if postprocessing != "none" else None
     load_sec = time.perf_counter() - t0
 
     rows = []
@@ -136,7 +159,8 @@ def run_sortformer(mode: str, audio: list[Path], out_dir: Path, device: str, bat
             torch.cuda.reset_peak_memory_stats()
         t0 = time.perf_counter()
         try:
-            preds = model.diarize(audio=str(wav), batch_size=batch_size, verbose=False)
+            preds = model.diarize(audio=str(wav), batch_size=batch_size,
+                                  postprocessing_yaml=pp_yaml, verbose=False)
             segs = parse_nemo_segments(preds[0] if preds else [])
             err = None
         except Exception as e:  # noqa: BLE001  record and continue
@@ -148,7 +172,11 @@ def run_sortformer(mode: str, audio: list[Path], out_dir: Path, device: str, bat
         print(f"[nemo:{mode}] {wav.name}: {rows[-1]['wall_sec']}s "
               f"{rows[-1]['n_speakers']}spk {rows[-1]['n_segments']}seg"
               + (f"  ERROR {err}" if err else ""), flush=True)
-    return {"model": model_src, "model_load_sec": round(load_sec, 2)}, rows
+    return {
+        "model": model_src, "model_load_sec": round(load_sec, 2),
+        "sf_latency": sf_latency if streaming else None,
+        "postprocessing": postprocessing,
+    }, rows
 
 
 def run_clustering(mode: str, audio: list[Path], out_dir: Path, device: str, batch_size: int):
@@ -233,6 +261,10 @@ def main() -> None:
     ap.add_argument("--json-out", type=Path)
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     ap.add_argument("--batch-size", type=int, default=1)
+    ap.add_argument("--sf-latency", default="high", choices=sorted(SF_STREAM_PRESETS),
+                    help="streaming Sortformer chunking preset (offline: 'high' is best)")
+    ap.add_argument("--postprocessing", default="none", choices=["none", *POST_PROC],
+                    help="Sortformer onset/offset/min-duration tuning")
     args = ap.parse_args()
 
     ensure_hf_token()
@@ -244,8 +276,11 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     audio = [p.resolve() for p in args.audio]
 
-    runner = run_sortformer if args.mode in MODELS else run_clustering
-    meta, rows = runner(args.mode, audio, args.out_dir, device, args.batch_size)
+    if args.mode in MODELS:
+        meta, rows = run_sortformer(args.mode, audio, args.out_dir, device, args.batch_size,
+                                    sf_latency=args.sf_latency, postprocessing=args.postprocessing)
+    else:
+        meta, rows = run_clustering(args.mode, audio, args.out_dir, device, args.batch_size)
 
     summary = {"mode": args.mode, "device": device, "torch": torch.__version__, **meta, "files": rows}
     if args.json_out:

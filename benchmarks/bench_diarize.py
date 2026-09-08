@@ -6,7 +6,10 @@ Compares diarization backends on the fixed sample in ``diarization/sample.txt``:
   * ``pyannote`` (default) - the project's current diarizer
     (pyannote/speaker-diarization-3.1 via whisperx), run in-process.
   * ``nemo-sf-offline``    - NeMo diar_sortformer_4spk-v1 (OOMs on long audio)
-  * ``nemo-sf-stream``     - NeMo diar_streaming_sortformer_4spk-v2.1
+  * ``nemo-sf-stream``     - NeMo diar_streaming_sortformer_4spk-v2.1, high-latency preset
+  * ``nemo-sf-stream-lo``  - "  " with the low-latency streaming preset
+  * ``nemo-sf-stream-ch``  - "  " + CallHome post-processing (the tuned config)
+  * ``nemo-sf-stream-dh``  - "  " + DIHARD3 post-processing
   * ``nemo-clust-general`` - NeMo ClusteringDiarizer, diar_infer_general.yaml
   * ``nemo-clust-meeting`` - NeMo ClusteringDiarizer, diar_infer_meeting.yaml
 
@@ -45,7 +48,7 @@ import time
 import wave
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterator, List, Tuple
+from typing import Callable, Dict, Iterator, List, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
@@ -222,16 +225,21 @@ def run_pyannote(todo: List[Path], hyp_dir: Path) -> Iterator[Tuple[Path, float,
     }
 
 
-# bench backend name -> nemo_diarize.py --mode
+# bench backend name -> (nemo_diarize.py --mode, [extra CLI args])
 NEMO_MODES = {
-    "nemo-sf-offline": "sortformer-offline",
-    "nemo-sf-stream": "sortformer-streaming",
-    "nemo-clust-general": "clustering-general",
-    "nemo-clust-meeting": "clustering-meeting",
+    "nemo-sf-offline": ("sortformer-offline", []),
+    "nemo-sf-stream": ("sortformer-streaming", ["--sf-latency", "low"]),   # Phase 2 baseline
+    "nemo-sf-stream-hi": ("sortformer-streaming", []),                     # high-latency preset
+    "nemo-sf-stream-ch": ("sortformer-streaming", ["--postprocessing", "callhome"]),  # tuned
+    "nemo-sf-stream-dh": ("sortformer-streaming", ["--postprocessing", "dihard3"]),
+    "nemo-clust-general": ("clustering-general", []),
+    "nemo-clust-meeting": ("clustering-meeting", []),
 }
 
 
-def make_nemo_runner(mode: str):
+def make_nemo_runner(spec) -> Callable:
+    mode, extra = spec
+
     def run(todo: List[Path], hyp_dir: Path) -> Iterator[Tuple[Path, float, float]]:
         py = NEMO_DIR / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         if not py.exists():
@@ -240,7 +248,7 @@ def make_nemo_runner(mode: str):
         summary_path = BENCH_DIR / f"_nemo_summary_{mode}.json"
         cmd = [
             str(py), str(NEMO_DIR / "nemo_diarize.py"),
-            "--mode", mode,
+            "--mode", mode, *extra,
             "--out-dir", str(hyp_dir),
             "--json-out", str(summary_path),
             "--device", "auto",
@@ -296,7 +304,8 @@ def main() -> None:
     ap.add_argument("--backend", default="pyannote", choices=sorted(RUNNERS))
     ap.add_argument("--sample", type=Path, default=BENCH_DIR / "sample.txt")
     ap.add_argument("--limit", type=int, default=0, help="only the first N sample files")
-    ap.add_argument("--fresh", action="store_true", help="ignore existing results and redo every file")
+    ap.add_argument("--fresh", action="store_true",
+                    help="truncate results_<backend>.csv and redo every file")
     args = ap.parse_args()
 
     sample = load_sample(args.sample)
@@ -309,8 +318,11 @@ def main() -> None:
     results_csv = BENCH_DIR / f"results_{args.backend}.csv"
     runs_jsonl = BENCH_DIR / f"runs_{args.backend}.jsonl"
 
+    if args.fresh:
+        results_csv.unlink(missing_ok=True)
+
     done: set[str] = set()
-    if results_csv.exists() and not args.fresh:
+    if results_csv.exists():
         with results_csv.open(encoding="utf-8") as fh:
             done = {r["file"] for r in csv.DictReader(fh)}
 

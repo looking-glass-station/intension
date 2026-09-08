@@ -1,0 +1,10 @@
+# Sortformer streaming diarizer post-processing, optimized on CallHome (NIST SRE
+# 2000 Disc8, callhome1). Source: NVIDIA-NeMo examples/speaker_tasks/diarization/
+# conf/post_processing/. ASCII-cleaned (NeMo reads this with the platform codec).
+parameters:
+  onset: 0.641           # onset threshold for the start of a speech segment
+  offset: 0.561          # offset threshold for the end of a speech segment
+  pad_onset: 0.229       # seconds added before each speech segment
+  pad_offset: 0.079      # seconds added after each speech segment
+  min_duration_on: 0.511  # drop speech segments shorter than this
+  min_duration_off: 0.296 # drop silences shorter than this (merges neighbours)
