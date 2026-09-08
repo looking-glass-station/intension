@@ -31,12 +31,12 @@ dependencies = [
     "soundfile==0.13.1",
     "ffmpeg-python==0.2.0",
 
-    # NOTE: the old .venv also carried nvidia-*-cu117 / nvidia-cudnn-cu11 wheels.
-    # Those are stale leftovers from an earlier torch+cu117 install and are not on
-    # PyPI. torch==2.5.1+cu118 bundles its own CUDA/cuDNN libs in the Windows
-    # wheel (torch/lib), which ctranslate2 picks up when torch is imported first.
-    # If GPU transcription can't find cuDNN, `uv pip install nvidia-cudnn-cu11`
-    # from https://pypi.ngc.nvidia.com as a one-off.
+    # ctranslate2 4.4.0 (CUDA 11 build, faster-whisper's backend) needs cuDNN 8
+    # (cudnn_ops_infer64_8.dll). torch 2.5.1+cu118 bundles cuDNN *9* in torch/lib,
+    # which CT2 can't use - so on Windows GPU transcription needs cuDNN 8 too.
+    # system_config.py adds site-packages/nvidia/cudnn/bin to the DLL path.
+    # torch itself only wants cuDNN on Linux (see [tool.uv] override below).
+    "nvidia-cudnn-cu11==8.9.5.29 ; sys_platform == 'win32'",
 
     # --- data / config ---
     "pandas==2.3.3",
@@ -84,6 +84,10 @@ package = false
 override-dependencies = [
     "webrtcvad ; python_version < '3.0'",
     "simpleaudio ; python_version < '3.0'",
+    # torch 2.5.1+cu118 pins nvidia-cudnn-cu11==9.1.0.70 (Linux-only marker); we
+    # need 8.9.x for ctranslate2 on Windows. Split by platform so both hold.
+    "nvidia-cudnn-cu11==8.9.5.29 ; sys_platform == 'win32'",
+    "nvidia-cudnn-cu11==9.1.0.70 ; sys_platform == 'linux'",
 ]
 
 # torch/torchaudio with the +cu118 local version come from PyTorch's own index.
