@@ -26,6 +26,9 @@ of those.
 - `tools/nemo_diarize/` is an isolated `uv` env (NeMo pins conflicting
   torch/numpy) invoked as a subprocess for the Sortformer diarization backend.
 - `bias.py` classifies via local Ollama (`gemma3:12b`), not an API.
+- Hugging Face model downloads are throttled on this connection and Windows here
+  lacks symlink privilege — if `snapshot_download` fails on `_create_symlink`
+  (WinError 1314), set `HF_HUB_DISABLE_SYMLINKS=1`.
 - Windows box; `git` is at `C:\Program Files\Git\cmd`. PowerShell has no
   heredocs — use `git commit -F <file>` or `@'...'@` here-strings.
 

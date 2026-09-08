@@ -29,11 +29,12 @@ from typing import Iterator, Optional, Literal
 import pandas as pd
 import soundfile as sf
 import librosa
+import torch
 from tqdm import tqdm
 from detoxify import Detoxify
 from transformers import pipeline
 
-from configs import get_configs
+from configs import iter_processing_configs
 from logger import global_logger
 
 
@@ -280,6 +281,10 @@ def rule_bucket_for_good_term(matched_terms: list[str], sentence: str, window_te
 def build_models() -> tuple[Detoxify, pipeline, pipeline]:
     """Initialize Detoxify, cardiffnlp, and audio emotion models."""
 
+    # transformers' pipeline(device_map="auto") needs the `accelerate` package;
+    # these two models are small, so pass an explicit device instead (as topics.py does).
+    device = 0 if torch.cuda.is_available() else -1
+
     # Detoxify unbiased model (for identity_attack + toxicity)
     detoxify_model = Detoxify('unbiased')
 
@@ -289,14 +294,14 @@ def build_models() -> tuple[Detoxify, pipeline, pipeline]:
         model="cardiffnlp/twitter-roberta-base-hate",
         tokenizer="cardiffnlp/twitter-roberta-base-hate",
         truncation=True,
-        device_map="auto",
+        device=device,
     )
 
     # Audio emotion recognition model (for tone/sentiment in voice)
     audio_emotion_model = pipeline(
         task="audio-classification",
         model="ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition",
-        device_map="auto",
+        device=device,
     )
 
     return detoxify_model, cardiffnlp_model, audio_emotion_model
@@ -639,76 +644,63 @@ def main() -> None:
     logger.info(f"Monitoring {len(bad_groups)} 'bad' groups ({len(bad_terms)} terms) "
                 f"and {len(good_groups)} 'good' groups ({len(good_terms)} terms)")
 
-    # Initialize models
-    logger.info("Loading models (Detoxify + cardiffnlp + audio emotion)...")
-    detoxify_model, cardiffnlp_model, audio_emotion_model = build_models()
+    # First pass: work out whether there's anything to do at all, so a model
+    # download failure doesn't halt the pipeline when there's nothing pending.
+    pending: list[tuple] = []  # (cfg, transcript_csv, wav_path, output_csv, clips_dir)
+    for cfg in iter_processing_configs(include_manual=True):
+        # Use labeled transcripts as canonical source; RTTM may be out of sync with transcript rows.
+        transcription_dir = cfg.output_path / 'transcription_labeled'
+        wav_dir = cfg.output_path / 'wav'
+        invective_dir = cfg.output_path / 'invective'
+        clips_dir = invective_dir / 'clips'
 
-    # Process all configured channels
+        if not transcription_dir.exists():
+            continue
+
+        for transcript_csv in transcription_dir.glob('*.csv'):
+            output_csv = invective_dir / f"{transcript_csv.stem}.csv"
+            # Skip if already processed and the transcript hasn't changed since.
+            if output_csv.exists() and output_csv.stat().st_mtime > transcript_csv.stat().st_mtime:
+                continue
+            wav_path = wav_dir / f"{transcript_csv.stem}.wav"
+            pending.append((cfg, transcript_csv, wav_path, output_csv, clips_dir))
+
+    if not pending:
+        logger.info("No transcripts to process for invective detection")
+        return
+
+    # Initialize models
+    logger.info(f"Loading models (Detoxify + cardiffnlp + audio emotion) for {len(pending)} file(s)...")
+    try:
+        detoxify_model, cardiffnlp_model, audio_emotion_model = build_models()
+    except Exception as e:
+        # This stage feeds bias.py extra context; if its models can't load, log
+        # and let the pipeline continue rather than halting everything.
+        logger.error(f"Could not load invective models, skipping this stage: {e}", exc_info=True)
+        return
+
     total_files = 0
     total_detections = 0
-
-    for channel_cfg in get_configs():
-        for config_list in vars(channel_cfg.download_configs).values():
-            if not isinstance(config_list, list) or not config_list:
-                continue
-
-            for cfg in config_list:
-                # Use labeled transcripts as canonical source; RTTM may be out of sync with transcript rows.
-                transcription_dir = cfg.output_path / 'transcription_labeled'
-                wav_dir = cfg.output_path / 'wav'
-                invective_dir = cfg.output_path / 'invective'
-                clips_dir = invective_dir / 'clips'
-
-                if not transcription_dir.exists():
-                    continue
-
-                # Collect all transcripts to process
-                all_transcripts = list(transcription_dir.glob('*.csv'))
-                transcripts_to_process = []
-
-                for transcript_csv in all_transcripts:
-                    video_name = transcript_csv.stem
-                    output_csv = invective_dir / f"{video_name}.csv"
-
-                    # Skip if already processed and WAV hasn't changed
-                    if output_csv.exists():
-                        transcript_mtime = transcript_csv.stat().st_mtime
-                        output_mtime = output_csv.stat().st_mtime
-                        if output_mtime > transcript_mtime:
-                            continue
-
-                    transcripts_to_process.append(transcript_csv)
-
-                if not transcripts_to_process:
-                    continue
-
-                # Process each transcript with progress bar
-                progress_desc = f"{cfg.channel_name_or_term}"
-                for transcript_csv in tqdm(transcripts_to_process, desc=progress_desc):
-                    video_name = transcript_csv.stem
-                    wav_path = wav_dir / f"{video_name}.wav"
-                    output_csv = invective_dir / f"{video_name}.csv"
-
-                    try:
-                        detections = process_transcript(
-                            transcript_csv,
-                            wav_path,
-                            output_csv,
-                            clips_dir,
-                            bad_terms,
-                            good_terms,
-                            term_to_group,
-                            detoxify_model,
-                            cardiffnlp_model,
-                            audio_emotion_model,
-                            min_score=0.5
-                        )
-
-                        total_files += 1
-                        total_detections += detections
-
-                    except Exception as e:
-                        logger.error(f"Error processing {video_name}: {e}", exc_info=True)
+    for cfg, transcript_csv, wav_path, output_csv, clips_dir in tqdm(pending, desc="invective"):
+        video_name = transcript_csv.stem
+        try:
+            detections = process_transcript(
+                transcript_csv,
+                wav_path,
+                output_csv,
+                clips_dir,
+                bad_terms,
+                good_terms,
+                term_to_group,
+                detoxify_model,
+                cardiffnlp_model,
+                audio_emotion_model,
+                min_score=0.5
+            )
+            total_files += 1
+            total_detections += detections
+        except Exception as e:
+            logger.error(f"Error processing {video_name}: {e}", exc_info=True)
 
     logger.info(f"\n{'='*60}")
     logger.info(f"Processed {total_files} files, found {total_detections} total detections")
