@@ -113,12 +113,17 @@ def characterise(segs: list[dict]) -> dict:
 
 
 def parse_nemo_segments(raw: list[str]) -> list[dict]:
-    """Sortformer returns ['<start> <end> <speaker>', ...] per audio file."""
+    """
+    Sortformer returns ['<start> <end> <speaker>', ...] *grouped by speaker*
+    (all of speaker_0, then all of speaker_1, ...). Sort by start time so the
+    RTTM is a usable sequential segmentation for downstream transcription.
+    """
     out = []
     for line in raw:
         p = line.split()
         if len(p) >= 3:
             out.append({"start": float(p[0]), "end": float(p[1]), "label": p[2]})
+    out.sort(key=lambda s: (s["start"], s["end"]))
     return out
 
 
