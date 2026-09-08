@@ -29,6 +29,7 @@ if __name__ == '__main__':
         root / "src" / "transcribe.py",
         root / "src" / "generate_host_match.py",
         root / "src" / "label_speakers.py",
+        root / "src" / "prosody.py",
         root / "src" / "invective.py",
         root / "src" / "bias.py",
         root / "src" / "topics.py",

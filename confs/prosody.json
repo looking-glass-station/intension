@@ -1,0 +1,16 @@
+{
+  "ser_model": "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim",
+  "min_segment_duration": 1.0,
+  "host_speakers_only": false,
+  "tier1_weights": {"rms": 1.0, "peak_rms": 0.7, "centroid": 0.6, "speaking_rate": 0.5},
+  "tier1_threshold": 1.4,
+  "aggression": {
+    "arousal_weight": 1.0,
+    "dominance_weight": 0.8,
+    "valence_weight": 0.8,
+    "tier1_weight": 0.6,
+    "tier2_weight": 1.0
+  },
+  "flag_threshold": 0.55,
+  "calibration_sample": 12
+}
