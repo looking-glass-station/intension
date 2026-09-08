@@ -12,6 +12,8 @@ wheels/
 /tokens/google
 /tokens/huggingface
 /confs/download_configurations_/
+/confs/download_configurations/*
+!/confs/download_configurations/pbs.json
 /confs/patreon_cookie.txt
 
 /logs/*
@@ -21,6 +23,7 @@ __pycache__
 /.idea/
 /logs/
 confs/patreon_cookie.txt
+
 tokens/patreon
 
 /.*/*
@@ -34,3 +37,6 @@ logs/transcription.log
 /logs
 
 
+/benchmarks/transcription
+/logs
+/logs
