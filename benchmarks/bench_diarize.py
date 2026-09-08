@@ -6,31 +6,29 @@ Compares diarization backends on the fixed sample in ``diarization/sample.txt``:
   * ``pyannote`` (default) - the project's current diarizer
     (pyannote/speaker-diarization-3.1 via whisperx), run in-process.
   * ``nemo-sf-offline``    - NeMo diar_sortformer_4spk-v1 (OOMs on long audio)
-  * ``nemo-sf-stream``     - NeMo diar_streaming_sortformer_4spk-v2.1, high-latency preset
-  * ``nemo-sf-stream-lo``  - "  " with the low-latency streaming preset
-  * ``nemo-sf-stream-ch``  - "  " + CallHome post-processing (the tuned config)
-  * ``nemo-sf-stream-dh``  - "  " + DIHARD3 post-processing
+  * ``nemo-sf-stream``     - diar_streaming_sortformer_4spk-v2.1, low-latency preset (Phase 2 baseline)
+  * ``nemo-sf-stream-hi``  - "  " with the high-latency streaming preset
+  * ``nemo-sf-stream-ch``  - "  " high-latency + CallHome post-processing (the tuned config)
+  * ``nemo-sf-stream-dh``  - "  " high-latency + DIHARD3 post-processing
   * ``nemo-clust-general`` - NeMo ClusteringDiarizer, diar_infer_general.yaml
   * ``nemo-clust-meeting`` - NeMo ClusteringDiarizer, diar_infer_meeting.yaml
 
   The nemo-* backends run through the isolated ``tools/nemo_diarize`` env as a
   subprocess (one call for the whole batch - NeMo's import alone costs ~2 min).
 
-Both produce the same per-file record: realtime factor, GPU peak, and a
-characterisation of the speaker segmentation. Segmentation stats are always
-recomputed here from the hypothesis RTTM, so the two backends are measured by
-identical code.
+Segmentation stats are always recomputed here from the hypothesis RTTM, so every
+backend is measured by identical code.
 
-Outputs (under benchmarks/diarization/, git-tracked):
-  results_<backend>.csv        one row per file, appended; existing files skipped
-  runs_<backend>.jsonl         one row per invocation (env, device, git, totals)
-  hyp_<backend>/<stem>.rttm    hypothesis segments
+Outputs (under benchmarks/diarization/, git-tracked), <slug> = <backend><tag>:
+  results_<slug>.csv        one row per file, appended; existing files skipped
+  runs_<slug>.jsonl         one row per invocation (env, device, git, totals)
+  hyp_<slug>/<stem>.rttm    hypothesis segments
 
 Never reads or writes anything under data/.
 
-    uv run python benchmarks/bench_diarize.py                 # pyannote
-    uv run python benchmarks/bench_diarize.py --backend nemo
-    uv run python benchmarks/bench_diarize.py --limit 2 --fresh
+    uv run python benchmarks/bench_diarize.py                          # pyannote
+    uv run python benchmarks/bench_diarize.py --backend nemo-sf-stream-ch
+    uv run python benchmarks/bench_diarize.py --backend pyannote --sample X --tag _stress
 """
 from __future__ import annotations
 
@@ -305,18 +303,22 @@ def main() -> None:
     ap.add_argument("--sample", type=Path, default=BENCH_DIR / "sample.txt")
     ap.add_argument("--limit", type=int, default=0, help="only the first N sample files")
     ap.add_argument("--fresh", action="store_true",
-                    help="truncate results_<backend>.csv and redo every file")
+                    help="truncate results_<backend><tag>.csv and redo every file")
+    ap.add_argument("--tag", default="",
+                    help="suffix for output files, e.g. --tag _stress -> results_<backend>_stress.csv "
+                         "(keeps an alternate --sample from clobbering the main results)")
     args = ap.parse_args()
 
     sample = load_sample(args.sample)
     if args.limit:
         sample = sample[: args.limit]
 
+    slug = f"{args.backend}{args.tag}"
     BENCH_DIR.mkdir(parents=True, exist_ok=True)
-    hyp_dir = BENCH_DIR / f"hyp_{args.backend}"
+    hyp_dir = BENCH_DIR / f"hyp_{slug}"
     hyp_dir.mkdir(exist_ok=True)
-    results_csv = BENCH_DIR / f"results_{args.backend}.csv"
-    runs_jsonl = BENCH_DIR / f"runs_{args.backend}.jsonl"
+    results_csv = BENCH_DIR / f"results_{slug}.csv"
+    runs_jsonl = BENCH_DIR / f"runs_{slug}.jsonl"
 
     if args.fresh:
         results_csv.unlink(missing_ok=True)
@@ -351,7 +353,7 @@ def main() -> None:
             segs = read_rttm(hyp_dir / f"{wav.stem}.rttm")
             stats = characterise(segs, audio_sec)
             row = {
-                "run_ts": run_ts, "backend": args.backend,
+                "run_ts": run_ts, "backend": slug,
                 "channel": channel_of(wav), "file": rel_of(wav),
                 "audio_sec": round(audio_sec, 2), "sr": probe["sr"], "subtype": probe["subtype"],
                 "wall_sec": round(wall_sec, 2),
@@ -374,7 +376,7 @@ def main() -> None:
 
     with runs_jsonl.open("a", encoding="utf-8") as jf:
         jf.write(json.dumps({
-            "run_ts": run_ts, "backend": args.backend, "git": git_commit(),
+            "run_ts": run_ts, "backend": slug, "git": git_commit(),
             "files": len(todo),
             "audio_sec": round(totals["audio"], 1),
             "wall_sec": round(totals["wall"], 1),

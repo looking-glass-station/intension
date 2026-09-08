@@ -134,6 +134,24 @@ def read_rttm(path: Path) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+def _cpu_mel_patch(model):
+    """
+    Above model.max_batch_dur (~5.5h) NeMo's diarize() takes an "OOM-safe" path
+    that only splits along the batch dim - useless for one long file, so the
+    whole-waveform GPU STFT fails ("CUDA driver error: device not ready").
+    Run the mel preprocessing on CPU (unbounded) and hand features to the GPU.
+    Adds ~1-2 min on a 10h file; only applied to files that need it.
+    """
+    import torch  # noqa: F401
+
+    def cpu_process_signal(audio_signal, audio_signal_length):
+        pp = model.preprocessor.to("cpu")
+        ps, psl = pp(input_signal=audio_signal.to("cpu"), length=audio_signal_length.to("cpu"))
+        return ps.to(model.device), psl.to(model.device)
+
+    model.process_signal = cpu_process_signal
+
+
 def run_sortformer(mode, audio, out_dir, device, batch_size, *,
                    sf_latency="high", postprocessing="none"):
     import torch
@@ -143,6 +161,7 @@ def run_sortformer(mode, audio, out_dir, device, batch_size, *,
     model.eval().to(device)
 
     streaming = mode == "sortformer-streaming"
+    long_thresh = getattr(model, "max_batch_dur", 20000) or 20000
     if streaming:
         for k, v in SF_STREAM_PRESETS[sf_latency].items():
             setattr(model.sortformer_modules, k, v)
@@ -151,10 +170,16 @@ def run_sortformer(mode, audio, out_dir, device, batch_size, *,
         if postprocessing != "none" else None
     load_sec = time.perf_counter() - t0
 
+    _plain_process_signal = getattr(model, "process_signal", None)
     rows = []
     for wav in audio:
         info = sf.info(str(wav))
         audio_sec = info.frames / float(info.samplerate)
+        if streaming and _plain_process_signal is not None:
+            if audio_sec > long_thresh and device == "cuda":
+                _cpu_mel_patch(model)
+            else:
+                model.process_signal = _plain_process_signal
         if device == "cuda":
             torch.cuda.reset_peak_memory_stats()
         t0 = time.perf_counter()
