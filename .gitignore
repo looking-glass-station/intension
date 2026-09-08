@@ -27,3 +27,10 @@ tokens/patreon
 backup_project.ps1
 src/test.py
 *.log
+
+/*TODO.md
+logs/transcription.log
+
+/logs
+
+

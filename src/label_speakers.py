@@ -40,29 +40,109 @@ def label_speakers(
     speakers = list({d['speaker'] for d in transcript_lines if 'speaker' in d})
     speaker_dict = {s: 'Guest' for s in speakers}
 
-    unmatched = True
-    while unmatched and target_similarity > 0:
-        for transcript_line in transcript_lines:
-            speaker_id = transcript_line['speaker']
-            duration = float(transcript_line['duration'])
-            start_time = float(transcript_line['start_time'])
+    # Aggregate per-speaker embeddings to avoid repeated per-row encoding.
+    speaker_durations = {}
+    speaker_first_appearance = {}
+    speaker_embedding_sums = {}
 
-            start_sample = int(start_time * sr)
-            end_sample = start_sample + int(duration * sr)
-            segment = audio[start_sample:end_sample]
+    for idx, transcript_line in enumerate(transcript_lines):
+        speaker_id = transcript_line['speaker']
+        duration = float(transcript_line['duration'])
+        start_time = float(transcript_line['start_time'])
 
-            embedding = encoder.embed_utterance(segment)
-            sims = [
-                np.dot(embedding, ke) / (np.linalg.norm(embedding) * np.linalg.norm(ke))
-                for ke in known_embeddings
-            ]
+        # Skip invalid segments to prevent slicing errors.
+        if duration <= 0.05 or duration > 3600:  # <0.05s or >1h
+            continue
 
-            max_idx = int(np.argmax(sims))
-            if sims[max_idx] >= target_similarity:
-                speaker_dict[speaker_id] = known_labels[max_idx]
-                unmatched = False
+        speaker_first_appearance.setdefault(speaker_id, idx)
+        speaker_durations[speaker_id] = speaker_durations.get(speaker_id, 0.0) + duration
 
-        target_similarity -= 0.01
+        start_sample = int(start_time * sr)
+        end_sample = start_sample + int(duration * sr)
+
+        # Protect against bad slicing.
+        if end_sample <= start_sample or start_sample < 0 or end_sample > len(audio):
+            continue
+
+        segment = audio[start_sample:end_sample]
+
+        embedding = encoder.embed_utterance(segment)
+        speaker_embedding_sums[speaker_id] = (
+            speaker_embedding_sums.get(speaker_id, np.zeros_like(embedding)) + embedding * duration
+        )
+
+    speaker_embeddings = {
+        spk: speaker_embedding_sums[spk] / speaker_durations[spk]
+        for spk in speaker_embedding_sums
+    }
+
+    # Prioritize host matching by first speaker (primary) and longest speaker (secondary).
+    first_speaker_id = min(speaker_first_appearance, key=speaker_first_appearance.get)
+    sorted_by_duration = sorted(speaker_durations, key=lambda s: speaker_durations[s], reverse=True)
+    candidate_speakers = [first_speaker_id] + [s for s in sorted_by_duration if s != first_speaker_id]
+
+    speaker_to_host_sim = {}
+    for speaker_id in candidate_speakers:
+        emb = speaker_embeddings[speaker_id]
+        speaker_to_host_sim[speaker_id] = [
+            np.dot(emb, ke) / (np.linalg.norm(emb) * np.linalg.norm(ke))
+            for ke in known_embeddings
+        ]
+
+    # Find primary host from prioritized speakers (first speaker -> longest speakers).
+    selected_host_idx = None
+    selected_host_label = None
+
+    while selected_host_idx is None and target_similarity >= 0:
+        for speaker_id in candidate_speakers:
+            sims = speaker_to_host_sim[speaker_id]
+            best_idx = int(np.argmax(sims))
+            best_sim = sims[best_idx]
+
+            if best_sim >= target_similarity:
+                selected_host_idx = best_idx
+                selected_host_label = known_labels[best_idx]
+                logger.info(
+                    f"Selected primary host {selected_host_label} from speaker {speaker_id} "
+                    f"(confidence {best_sim:.3f}, threshold {target_similarity:.2f})"
+                )
+                break
+
+        if selected_host_idx is None:
+            target_similarity -= 0.01
+
+    if selected_host_idx is None:
+        error_details = []
+        for speaker_id in candidate_speakers:
+            sims = speaker_to_host_sim[speaker_id]
+            best_idx = int(np.argmax(sims))
+            error_details.append(f"{speaker_id}: {known_labels[best_idx]} ({sims[best_idx]:.3f})")
+        names = ", ".join(known_labels)
+        error = (
+            f"NO host labels ({names}) FOUND IN {wav_file} - consider lowering similarity below "
+            f"{target_similarity + 0.01:.2f}. Details: {', '.join(error_details)}"
+        )
+        logger.error(error)
+        raise RuntimeError(error)
+
+    # Assign selected host label to all {@speaker_id} with sufficient similarity.
+    min_host_assignment_similarity = max(target_similarity, 0.80)
+    assigned_any = False
+    for speaker_id, sims in speaker_to_host_sim.items():
+        if sims[selected_host_idx] >= min_host_assignment_similarity:
+            speaker_dict[speaker_id] = selected_host_label
+            assigned_any = True
+            logger.info(
+                f"Assigned {selected_host_label} to speaker {speaker_id} "
+                f"(confidence: {sims[selected_host_idx]:.3f})"
+            )
+
+    if not assigned_any:
+        # This should not happen if we selected a host above, but include fallback protection.
+        error = f"Matched host {selected_host_label} but could not assign to any speaker in {wav_file}."
+        logger.error(error)
+        raise RuntimeError(error)
+
 
     if not any(label in speaker_dict.values() for label in known_labels):
         names = ", ".join(known_labels)

@@ -32,7 +32,7 @@ class Transcriber:
         self.global_config = get_global_config()
         self.transcribe_beam_size = self._env_int("INTENSION_TRANSCRIBE_BEAM_SIZE", 1)
         self.transcribe_best_of = self._env_int("INTENSION_TRANSCRIBE_BEST_OF", 1)
-        self.transcribe_batch_size = self._env_int("INTENSION_TRANSCRIBE_BATCH_SIZE", 16) # depends on your vram size, not much benefit past 16 for most cases
+        self.transcribe_batch_size = self._env_int("INTENSION_TRANSCRIBE_BATCH_SIZE", 10) # depends on your vram size, not much benefit past 16 for most cases
         self.use_batched_transcribe = self._env_bool("INTENSION_TRANSCRIBE_BATCHED", True) 
         self.model = self._load_model()
         self.batched_model = (
