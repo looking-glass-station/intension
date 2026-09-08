@@ -128,6 +128,9 @@ def classify_batch(
                     {"role": "user", "content": user_message},
                 ],
                 format="json",
+                # Deterministic: this is structured classification, and without
+                # this gemma3 samples, so findings drift on every re-run.
+                options={"temperature": 0},
             )
             raw = response["message"]["content"]
             parsed = parse_response(raw, logger)
