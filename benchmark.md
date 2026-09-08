@@ -1,14 +1,16 @@
 # Pipeline benchmarks
 
-Host-neutral summary of the efficiency-pass measurements — this file is the
-public summary; the harnesses live in `benchmarks/` and regenerate the detailed
-per-file tables locally (some hold verbatim transcript text and stay untracked).
+Neutral summary of the efficiency-pass measurements — this file is the public
+write-up. The harness scripts live in `benchmarks/` (see `benchmarks/README.md`);
+they regenerate the detailed per-file tables locally, and those stay untracked
+because they name the material the pipeline was run on.
 
 Reports so far:
 
 - **diarization backend** — pyannote → streaming Sortformer
 - **transcription compute type** — float16 → int8_float16
 - **speaker-labeling device** — GPU → CPU voice encoder
+- **bias classification** — model size + batch concurrency
 
 ---
 
@@ -47,7 +49,7 @@ simultaneous speakers separated.
 
 The Sortformer / clustering backends run in an isolated environment
 (`tools/nemo_diarize/`, NeMo pins conflicting torch/numpy versions) and are
-invoked as a subprocess. See NOTES.md for setup.
+invoked as a subprocess. See `benchmarks/README.md` for setup.
 
 ### Test set
 

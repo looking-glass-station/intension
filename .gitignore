@@ -2,7 +2,7 @@
 .venv/
 wheels/
 /tools/nemo_diarize/models/
-/benchmarks/diarization/_nemo_summary_*.json
+
 /data/
 /src/pre_build/
 /src/pretrained_models/
@@ -17,13 +17,12 @@ wheels/
 /confs/patreon_cookie.txt
 
 /logs/*
+/logs/
 /powerbi/
 __pycache__
 
 /.idea/
-/logs/
 confs/patreon_cookie.txt
-
 tokens/patreon
 
 /.*/*
@@ -32,11 +31,11 @@ src/test.py
 *.log
 
 /*TODO.md
-logs/transcription.log
 
-/logs
-
-
-/benchmarks/transcription
-/logs
-/logs
+# Benchmark artifacts. The harness scripts (benchmarks/*.py) and the generic
+# write-up (benchmark.md) are tracked; everything that identifies what the tool
+# was actually run on - sample lists, hypothesis RTTMs, transcripts, findings,
+# per-file result tables, NOTES.md - stays local. See benchmarks/README.md.
+/benchmarks/diarization/
+/benchmarks/transcription/
+/benchmarks/bias_eval/
