@@ -60,11 +60,17 @@ def load_labels() -> list[dict]:
     return rows
 
 
-def emotion2vec_only(rows):
-    from funasr import AutoModel
+def emotion2vec_only(rows, model_id="iic/emotion2vec_plus_large"):
+    import numpy as np
     import soundfile as sf
     import librosa
-    m = AutoModel(model="iic/emotion2vec_plus_large", hub="hf", disable_update=True)
+    from funasr import AutoModel
+
+    try:
+        m = AutoModel(model=model_id, hub="hf", disable_update=True)
+    except TypeError:
+        m = AutoModel(model=model_id, hub="hf")
+
     out = {}
     for r in rows:
         wav, sr = sf.read(str(CLIPS / r["clip"]), dtype="float32")
@@ -72,12 +78,17 @@ def emotion2vec_only(rows):
             wav = wav.mean(axis=1)
         if sr != 16000:
             wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
-        res = m.generate(wav, granularity="utterance", extract_embedding=False)[0]
-        d = {lbl.split("/")[-1].strip().lower(): s for lbl, s in zip(res["labels"], res["scores"])}
+        res = m.generate(np.ascontiguousarray(wav), granularity="utterance", extract_embedding=False)[0]
+        d = {lbl.split("/")[-1].strip().lower(): float(s)
+             for lbl, s in zip(res["labels"], res["scores"])}
+        # emotion2vec_plus classes: angry disgusted fearful happy neutral other sad surprised unknown
         out[r["clip"]] = round(d.get("angry", 0.0) + d.get("disgusted", 0.0), 4)
     (EVAL / "_emotion2vec.csv").write_text(
         "clip,emotion2vec_hostile\n" + "".join(f"{k},{v}\n" for k, v in out.items()), encoding="utf-8")
     print(f"emotion2vec scored {len(out)} clips -> {EVAL / '_emotion2vec.csv'}")
+    # a peek at the raw distribution
+    labels = list(d)
+    print("classes:", labels)
 
 
 def main() -> None:
@@ -200,8 +211,24 @@ def main() -> None:
                for r in csv.DictReader(e2v_file.open(encoding="utf-8"))}
         scorers["emotion2vec (ang+disg)"] = lambda r: e2v.get(r["clip"], float("nan"))
 
+    # min-max normalise each model across all clips so an ensemble is comparable
+    all_scores = {name: [fn(r) for r in rows] for name, fn in scorers.items()}
+
+    def _norm(name):
+        vs = [v for v in all_scores[name] if not math.isnan(v)]
+        lo, hi = (min(vs), max(vs)) if vs else (0.0, 1.0)
+        return {r["clip"]: (0.5 if hi <= lo or math.isnan(v) else (v - lo) / (hi - lo))
+                for r, v in zip(rows, all_scores[name])}
+
+    norm = {name: _norm(name) for name in scorers}
+    if "audeering (dim->aggr)" in norm and "3loi-cat (ang+cont+disg)" in norm:
+        scorers["ENSEMBLE max(3loi-cat, audeering)"] = (
+            lambda r, _a=norm["audeering (dim->aggr)"], _c=norm["3loi-cat (ang+cont+disg)"]:
+            max(_a[r["clip"]], _c[r["clip"]]))
+
     lines = ["# Prosody SER model comparison (against hand labels)\n",
-             f"{len(rows)} clips, {n_y} aggressive / {len(rows) - n_y} not.\n",
+             f"{len(rows)} clips, {n_y} aggressive / {len(rows) - n_y} not. Ensemble is on "
+             "min-max-normalised scores.\n",
              "| model | mean Y | mean N | AUC | best-threshold acc |",
              "|---|--:|--:|--:|--:|"]
     results = {}
@@ -213,11 +240,11 @@ def main() -> None:
         if not pos or not neg:
             lines.append(f"| {name} | - | - | - | - |")
             continue
-        a = auc(pos, neg)
+        au = auc(pos, neg)
         t, acc = best_threshold(pos, neg)
-        results[name] = a
+        results[name] = au
         lines.append(f"| {name} | {sum(pos)/len(pos):.3f} | {sum(neg)/len(neg):.3f} | "
-                     f"**{a:.3f}** | {acc:.2f} @ t={t:.2f} |")
+                     f"**{au:.3f}** | {acc:.2f} @ t={t:.2f} |")
 
     # per-clip scores for inspection
     with (EVAL / "model_scores.csv").open("w", newline="", encoding="utf-8") as fh:

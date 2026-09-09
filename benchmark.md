@@ -391,13 +391,34 @@ pipeline.
 Output is the **complete** per-segment record (`prosody/<video>.csv`), not just
 flagged rows, plus an Audacity label track for segments over threshold.
 
-**Open question — the Tier-2 model and thresholds need a listen-through.** On a
-first sample, `audeering`'s dimensional scores and a second model
-(`superb/wav2vec2-base-superb-er`, IEMOCAP anger) disagree substantially on
-individual clips — one rates a quiet segment 0.94 "angry" that the other rates
-calm, and vice-versa. `benchmarks/bench_prosody.py` extracts the candidate clips
-and builds a table to fill in by ear; `confs/prosody.json`'s weights and
-thresholds should be set against that, not trusted blind.
+### What actually works (65 hand-labelled clips)
+
+A reviewer labelled 65 clips Y/N by ear (`bench_prosody.py` → `bench_prosody_models.py`
+scores them against a panel). The content — political reaction streams — turned
+out to be almost uniformly high-arousal, and what a listener calls "aggressive"
+is mostly **rhetorical hostility** (contempt, sarcasm, accusation), which is
+*cold*, not shouted. So:
+
+| signal | ROC-AUC (Y vs N) |
+| --- | --: |
+| Tier-1 DSP loudness | 0.50 — useless here (nothing is shouted) |
+| `emotion2vec_plus_large` | 0.57 — near-silent, "neutral" for almost everything |
+| `superb` (IEMOCAP anger) | 0.67 |
+| `audeering` (MSP-Podcast dim) | 0.73 |
+| **`3loi` MSP-Podcast categorical** (anger+contempt+disgust) | **0.75** — the *contempt* class matters |
+| **`max(3loi-cat, audeering)`** | **0.82** |
+
+The ensemble wins because the two models catch different failures — 3loi-cat
+gets cold contempt ("you demonic fucking scum", which `audeering` and
+`emotion2vec` both miss), `audeering` gets high-arousal mockery that 3loi-cat
+misses. No single model is a clean detector; **`max(3loi-cat, audeering)` at
+AUC ~0.82 is a useful *ranker*.** (n = 6 positives, so ± ~0.12 — a bigger
+labelling pass is needed to firm it up.)
+
+**Consequence for the design:** prosody's output is a **ranked list of review
+candidates**, not a binary flag. The per-segment CSV keeps every score; the
+Audacity flag only trips at a high threshold. It feeds a reviewer and `bias.py`
+as a prior — it does not stand alone.
 
 ### invective.py now shares this signal
 
