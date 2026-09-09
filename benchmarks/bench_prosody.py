@@ -29,9 +29,12 @@ EVAL = ROOT / "benchmarks" / "prosody_eval"
 print = functools.partial(print, flush=True)  # noqa: A001
 
 
-def find_pairs(needles, limit):
+def find_pairs(needles, limit, channel=None):
     out = []
     for lab in (ROOT / "data").glob("*/*/*/transcription_labeled/*.csv"):
+        rel = str(lab.relative_to(ROOT / "data")).replace("\\", "/")
+        if channel and channel.lower() not in rel.lower():
+            continue
         if needles and not any(n.lower() in lab.stem.lower() for n in needles):
             continue
         wav = lab.parents[1] / "wav" / f"{lab.stem}.wav"
@@ -45,6 +48,8 @@ def find_pairs(needles, limit):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--files", nargs="+", default=None)
+    ap.add_argument("--channel", default=None,
+                    help="restrict to transcripts under a data/ path matching this (e.g. 'hasan/youtube')")
     ap.add_argument("--limit", type=int, default=3, help="how many transcripts")
     ap.add_argument("--top", type=int, default=10, help="top-N Tier-1 clips per file")
     ap.add_argument("--control", type=int, default=6, help="random control clips per file")
@@ -61,7 +66,7 @@ def main() -> None:
 
     cfg = prosody.load_prosody_config()
     logger = global_logger("bench_prosody")
-    pairs = find_pairs(args.files, args.limit)
+    pairs = find_pairs(args.files, args.limit, args.channel)
     if not pairs:
         raise SystemExit("no transcript/wav pairs found")
 
