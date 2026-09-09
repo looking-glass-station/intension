@@ -26,16 +26,21 @@ from pathlib import Path
 import re
 from typing import Iterator, Optional, Literal
 
+import numpy as np
 import pandas as pd
 import soundfile as sf
-import librosa
 import torch
 from tqdm import tqdm
 from detoxify import Detoxify
 from transformers import pipeline
 
+import audio_affect
 from configs import iter_processing_configs
 from logger import global_logger
+
+# prosody.py runs ahead of this stage and scores every diarized segment for
+# aggressive delivery; a segment at/above this counts as "hostile audio" here.
+HOSTILE_AGGRESSION_THRESHOLD = 0.55
 
 
 @dataclass(frozen=True)
@@ -68,8 +73,7 @@ class ScoredOccurrence:
     detoxify_toxicity: float
     cardiffnlp_label: str
     cardiffnlp_score: float
-    audio_emotion_label: str  # e.g., "angry", "neutral", "happy"
-    audio_emotion_score: float  # confidence in that emotion
+    prosody_aggression: Optional[float]  # prosody.py's per-segment score, None if that pass hasn't run
     final_label: str
     final_score: float
     audio_clip_path: Optional[str]
@@ -278,17 +282,59 @@ def rule_bucket_for_good_term(matched_terms: list[str], sentence: str, window_te
     return "unknown"
 
 
-def build_models() -> tuple[Detoxify, pipeline, pipeline]:
-    """Initialize Detoxify, cardiffnlp, and audio emotion models."""
+def classify_occurrence(
+    term_type: str,
+    bucket: str,
+    identity_attack: float,
+    toxicity: float,
+    hostile_audio: bool,
+) -> tuple[str, float]:
+    """
+    Final label + score from the rule bucket, the text-model scores, and the
+    tone signal (hostile_audio, now from prosody.py). Split out so it can be
+    replayed against stored rows when the tone source changes.
+    """
+    if term_type == "bad":
+        # hostile_audio (prosody's aggression score) only *modulates* a text
+        # signal here - it can keep an identity term said with venom out of the
+        # NEUTRAL bucket, and confirm a likely-invective slur into HIGH. It must
+        # not manufacture a finding on its own: a heated debate *about* a group
+        # is aggressive delivery, not invective, and would otherwise land in
+        # MEDIUM via "hostile + some identity_attack".
+        if bucket == "mention_or_metalinguistic":
+            return "NON_INVECTIVE_MENTION", 0.10
+        if bucket == "self_id_or_neutral" and identity_attack < 0.5 and not hostile_audio:
+            return "NON_INVECTIVE_NEUTRAL", 0.15
+        if bucket == "likely_invective" and (identity_attack >= 0.6 or toxicity >= 0.6) and hostile_audio:
+            return "INVECTIVE_HIGH_CONFIDENCE", 0.80 + 0.20 * max(identity_attack, toxicity)
+        if bucket == "likely_invective" and (identity_attack >= 0.6 or toxicity >= 0.6):
+            return "INVECTIVE_HIGH_CONFIDENCE", 0.70 + 0.30 * max(identity_attack, toxicity)
+        if identity_attack >= 0.7 or toxicity >= 0.7:
+            return "INVECTIVE_MEDIUM_CONFIDENCE", 0.60 + 0.30 * max(identity_attack, toxicity)
+        if bucket == "likely_invective" or identity_attack >= 0.4:
+            return "INVECTIVE_LOW_CONFIDENCE", 0.30 + 0.20 * max(identity_attack, toxicity)
+        return "NON_INVECTIVE_AMBIGUOUS", 0.20
 
+    # term_type == "good": detect positive/praising usage (inverse logic)
+    if bucket == "factual_or_critical":
+        return "NON_PRAISE_CRITICAL", 0.10
+    if bucket == "likely_positive" and toxicity < 0.4:
+        return "PRAISE_HIGH_CONFIDENCE", 0.70 + 0.30 * (1.0 - toxicity)
+    if toxicity < 0.3:
+        return "PRAISE_MEDIUM_CONFIDENCE", 0.50 + 0.20 * (1.0 - toxicity)
+    return "NON_PRAISE_AMBIGUOUS", 0.20
+
+
+def build_models() -> tuple[Detoxify, pipeline]:
+    """Detoxify (identity_attack + toxicity) + cardiffnlp hate speech.
+
+    The audio/tone signal now comes from prosody.py (shared audeering model,
+    scored once per segment) - see load_prosody_scores.
+    """
     # transformers' pipeline(device_map="auto") needs the `accelerate` package;
-    # these two models are small, so pass an explicit device instead (as topics.py does).
+    # cardiffnlp is small, so pass an explicit device instead (as topics.py does).
     device = 0 if torch.cuda.is_available() else -1
-
-    # Detoxify unbiased model (for identity_attack + toxicity)
     detoxify_model = Detoxify('unbiased')
-
-    # Cardiff NLP hate speech model (for casual/social media speech)
     cardiffnlp_model = pipeline(
         task="text-classification",
         model="cardiffnlp/twitter-roberta-base-hate",
@@ -296,15 +342,19 @@ def build_models() -> tuple[Detoxify, pipeline, pipeline]:
         truncation=True,
         device=device,
     )
+    return detoxify_model, cardiffnlp_model
 
-    # Audio emotion recognition model (for tone/sentiment in voice)
-    audio_emotion_model = pipeline(
-        task="audio-classification",
-        model="ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition",
-        device=device,
-    )
 
-    return detoxify_model, cardiffnlp_model, audio_emotion_model
+def load_prosody_scores(transcript_path: Path) -> dict[float, float]:
+    """{segment start_time -> aggression_score} from prosody/<stem>.csv, if present."""
+    p = transcript_path.parent.parent / "prosody" / transcript_path.name
+    if not p.exists():
+        return {}
+    try:
+        rows = pd.read_csv(p).to_dict("records")
+        return {round(float(r["start_time"]), 2): float(r["aggression_score"]) for r in rows}
+    except Exception:
+        return {}
 
 
 def score_occurrences(
@@ -312,43 +362,32 @@ def score_occurrences(
     occs: list[Occurrence],
     detoxify_model: Detoxify,
     cardiffnlp_model: pipeline,
-    audio_emotion_model: pipeline,
-    wav_path: Path,
+    audio: Optional[np.ndarray],
+    sr: int,
     clips_dir: Path,
+    prosody_scores: dict[float, float],
     window_before: int = 2,
     window_after: int = 2,
 ) -> list[ScoredOccurrence]:
-    """Score occurrences using text models + audio emotion analysis."""
+    """Score occurrences with the text models plus prosody.py's aggression score."""
 
+    channel_dir = clips_dir.parents[1]  # <channel>/invective/clips -> <channel>
     results: list[ScoredOccurrence] = []
 
     for occ in occs:
         window = context_window(df, occ.line_idx, before=window_before, after=window_after)
 
-        # Extract audio clip first (for emotion analysis)
         terms_str = "_".join(occ.matched_terms[:2])
-        clip_filename = f"{occ.video_name}_{occ.line_idx}_{terms_str}_temp.wav"
-        clip_path = clips_dir / clip_filename
+        clip_path = clips_dir / f"{occ.video_name}_{occ.line_idx}_{terms_str}_temp.wav"
 
-        audio_emotion_label = "unknown"
-        audio_emotion_score = 0.0
-
-        if wav_path.exists():
+        # Review clip: slice the already-loaded array (no per-occurrence file read)
+        if audio is not None:
             try:
-                clip_path.parent.mkdir(parents=True, exist_ok=True)
-                extract_audio_clip(
-                    wav_path,
-                    occ.start_time,
-                    occ.end_time,
-                    clip_path,
-                    sentence=occ.sentence,
-                    keyword_char_pos=occ.char_start,
-                    lead_up_seconds=1.0
-                )
-                # Score audio emotion
-                audio_emotion_label, audio_emotion_score = score_audio_emotion(clip_path, audio_emotion_model)
-            except Exception as e:
-                print(f"Warning: Could not process audio for line {occ.line_idx}: {e}")
+                cs, ce = keyword_clip_window(occ.start_time, occ.end_time, occ.sentence,
+                                             occ.char_start, lead_up_seconds=1.0)
+                audio_affect.extract_clip(audio, sr, cs, ce, clip_path)
+            except Exception as e:  # noqa: BLE001
+                print(f"Warning: Could not write clip for line {occ.line_idx}: {e}")
 
         # Get detoxify scores
         detox_results = detoxify_model.predict(window)
@@ -360,82 +399,27 @@ def score_occurrences(
         cardiff_label = str(cardiff_pred.get("label", ""))
         cardiff_score = float(cardiff_pred.get("score", 0.0))
 
-        # Check if audio indicates hostile/angry tone
-        hostile_audio = audio_emotion_label.lower() in ["angry", "disgust", "fear"] and audio_emotion_score >= 0.5
+        # Tone signal from prosody.py's per-segment aggression score
+        prosody_aggression = prosody_scores.get(round(occ.start_time, 2))
+        hostile_audio = prosody_aggression is not None and prosody_aggression >= HOSTILE_AGGRESSION_THRESHOLD
 
-        # Different logic for "bad" vs "good" terms
         if occ.term_type == "bad":
-            # For bad terms: detect invective usage
             bucket = rule_bucket_for_bad_term(occ.matched_terms, occ.sentence, window)
-
-            # Metalinguistic mentions are not invective
-            if bucket == "mention_or_metalinguistic":
-                final_label = "NON_INVECTIVE_MENTION"
-                final_score = 0.10
-
-            # Neutral/identity mentions with low toxicity
-            elif bucket == "self_id_or_neutral" and identity_attack < 0.5 and not hostile_audio:
-                final_label = "NON_INVECTIVE_NEUTRAL"
-                final_score = 0.15
-
-            # High confidence invective: rules + models + audio agree
-            elif bucket == "likely_invective" and (identity_attack >= 0.6 or toxicity >= 0.6) and hostile_audio:
-                final_label = "INVECTIVE_HIGH_CONFIDENCE"
-                final_score = 0.80 + 0.20 * max(identity_attack, toxicity)
-
-            # High confidence from text models only
-            elif bucket == "likely_invective" and (identity_attack >= 0.6 or toxicity >= 0.6):
-                final_label = "INVECTIVE_HIGH_CONFIDENCE"
-                final_score = 0.70 + 0.30 * max(identity_attack, toxicity)
-
-            # Medium confidence: strong text signal OR hostile audio + some text signal
-            elif identity_attack >= 0.7 or toxicity >= 0.7 or (hostile_audio and identity_attack >= 0.5):
-                final_label = "INVECTIVE_MEDIUM_CONFIDENCE"
-                final_score = 0.60 + 0.30 * max(identity_attack, toxicity)
-
-            # Low confidence: some signals but unclear
-            elif bucket == "likely_invective" or identity_attack >= 0.4 or hostile_audio:
-                final_label = "INVECTIVE_LOW_CONFIDENCE"
-                final_score = 0.30 + 0.20 * max(identity_attack, toxicity)
-
-            else:
-                final_label = "NON_INVECTIVE_AMBIGUOUS"
-                final_score = 0.20
-
-        else:  # term_type == "good"
-            # For good terms: detect POSITIVE usage (inverse logic)
+        else:
             bucket = rule_bucket_for_good_term(occ.matched_terms, occ.sentence, window)
-
-            # Critical/factual mentions are normal (low toxicity expected)
-            if bucket == "factual_or_critical":
-                final_label = "NON_PRAISE_CRITICAL"
-                final_score = 0.10
-
-            # Positive mentions with LOW toxicity = praising terrorists (FLAG)
-            elif bucket == "likely_positive" and toxicity < 0.4:
-                final_label = "PRAISE_HIGH_CONFIDENCE"
-                final_score = 0.70 + 0.30 * (1.0 - toxicity)
-
-            # Low toxicity without clear positive rules
-            elif toxicity < 0.3:
-                final_label = "PRAISE_MEDIUM_CONFIDENCE"
-                final_score = 0.50 + 0.20 * (1.0 - toxicity)
-
-            else:
-                final_label = "NON_PRAISE_AMBIGUOUS"
-                final_score = 0.20
+        final_label, final_score = classify_occurrence(
+            occ.term_type, bucket, identity_attack, toxicity, hostile_audio)
 
         # Rename temp clip to final label
         final_clip_path = None
         if clip_path.exists():
-            final_clip_filename = f"{occ.video_name}_{occ.line_idx}_{terms_str}_{final_label}.wav"
-            final_clip_path = clips_dir / final_clip_filename
+            dest = clips_dir / f"{occ.video_name}_{occ.line_idx}_{terms_str}_{final_label}.wav"
             try:
-                clip_path.rename(final_clip_path)
-                final_clip_path = str(final_clip_path.relative_to(wav_path.parent.parent))
+                clip_path.rename(dest)
+                final_clip_path = str(dest.relative_to(channel_dir))
             except Exception as e:
                 print(f"Warning: Could not rename clip {clip_path}: {e}")
-                final_clip_path = str(clip_path.relative_to(wav_path.parent.parent))
+                final_clip_path = str(clip_path.relative_to(channel_dir))
 
         results.append(
             ScoredOccurrence(
@@ -446,8 +430,7 @@ def score_occurrences(
                 detoxify_toxicity=toxicity,
                 cardiffnlp_label=cardiff_label,
                 cardiffnlp_score=cardiff_score,
-                audio_emotion_label=audio_emotion_label,
-                audio_emotion_score=audio_emotion_score,
+                prosody_aggression=prosody_aggression,
                 final_label=final_label,
                 final_score=final_score,
                 audio_clip_path=final_clip_path,
@@ -457,83 +440,26 @@ def score_occurrences(
     return results
 
 
-def extract_audio_clip(
-    wav_path: Path,
+def keyword_clip_window(
     start_time: float,
     end_time: float,
-    output_path: Path,
     sentence: str,
     keyword_char_pos: int,
     lead_up_seconds: float = 1.5,
-    max_clip_duration: float = 8.0
-) -> bool:
-    """Extract audio segment with keyword context.
-
-    Extracts a short clip with lead-up to the keyword and a few seconds after.
-    Caps the maximum clip duration to keep files manageable.
-
-    Returns:
-        True if extraction succeeded, False otherwise
+    max_clip_duration: float = 8.0,
+) -> tuple[float, float]:
     """
-
-    sentence_duration = end_time - start_time
-    sentence_length = len(sentence)
-
-    # Estimate keyword position in audio based on character position
-    # Assume roughly uniform speech rate across the sentence
-    if sentence_length > 0:
-        keyword_ratio = keyword_char_pos / sentence_length
-        estimated_keyword_time = start_time + (sentence_duration * keyword_ratio)
+    (clip_start, clip_end) seconds for a review clip centred on the keyword:
+    lead-up before the estimated keyword time, out to the end of the sentence or
+    a max duration. The actual write is audio_affect.extract_clip on the loaded array.
+    """
+    if len(sentence) > 0:
+        estimated_keyword_time = start_time + (end_time - start_time) * (keyword_char_pos / len(sentence))
     else:
         estimated_keyword_time = start_time
-
-    # Extract from lead_up before keyword
-    clip_start = max(0, estimated_keyword_time - lead_up_seconds)
-
-    # Extract until end of sentence OR max duration, whichever is shorter
-    clip_end = min(
-        end_time,  # End of sentence
-        clip_start + max_clip_duration  # Maximum clip length
-    )
-
-    clip_duration = clip_end - clip_start
-
-    # Load and extract segment
-    audio, sr = librosa.load(
-        str(wav_path),
-        offset=clip_start,
-        duration=clip_duration,
-        sr=16000,
-        mono=True
-    )
-
-    # Save clip
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(output_path), audio, sr)
-    return True
-
-
-def score_audio_emotion(audio_path: Path, emotion_model: pipeline) -> tuple[str, float]:
-    """Score audio clip for emotion/tone using wav2vec2 model.
-
-    Returns:
-        (emotion_label, confidence_score)
-    """
-    try:
-        # Run emotion classification
-        result = emotion_model(str(audio_path), top_k=1)
-
-        if result and len(result) > 0:
-            top_emotion = result[0]
-            label = str(top_emotion.get("label", "unknown"))
-            score = float(top_emotion.get("score", 0.0))
-            return label, score
-        else:
-            return "unknown", 0.0
-
-    except Exception as e:
-        print(f"Warning: Could not score audio emotion for {audio_path}: {e}")
-        return "error", 0.0
+    clip_start = max(0.0, estimated_keyword_time - lead_up_seconds)
+    clip_end = min(end_time, clip_start + max_clip_duration)
+    return clip_start, clip_end
 
 
 
@@ -560,8 +486,8 @@ def to_dataframe(scored: list[ScoredOccurrence]) -> pd.DataFrame:
                 "detoxify_toxicity": round(s.detoxify_toxicity, 3),
                 "cardiffnlp_label": s.cardiffnlp_label,
                 "cardiffnlp_score": round(s.cardiffnlp_score, 3),
-                "audio_emotion_label": s.audio_emotion_label,
-                "audio_emotion_score": round(s.audio_emotion_score, 3),
+                "prosody_aggression": ("" if s.prosody_aggression is None
+                                       else round(s.prosody_aggression, 3)),
                 "final_label": s.final_label,
                 "final_score": round(s.final_score, 3),
                 "timestamp_url": o.timestamp_url,
@@ -581,33 +507,32 @@ def process_transcript(
     term_to_group: dict[str, tuple[str, str]],
     detoxify_model: Detoxify,
     cardiffnlp_model: pipeline,
-    audio_emotion_model: pipeline,
     min_score: float = 0.5
 ) -> int:
     """Process a single transcript file."""
 
-    # Read transcript
     df = read_transcript_csv(transcript_path)
     if df.empty:
         return 0
 
-    # Get video name for audio clip naming
     video_name = transcript_path.stem
-
-    # Find occurrences
     occs = list(iter_occurrences(df, bad_terms, good_terms, term_to_group, video_name))
     if not occs:
         return 0
 
-    # Score occurrences (now includes audio extraction and emotion analysis)
+    # Load the wav once (for review clips) and prosody's per-segment scores.
+    audio: Optional[np.ndarray] = None
+    sr = 16000
+    if wav_path.exists():
+        try:
+            audio, sr = sf.read(str(wav_path), dtype="float32")
+        except Exception as e:  # noqa: BLE001
+            print(f"Warning: could not read {wav_path.name}: {e}")
+    prosody_scores = load_prosody_scores(transcript_path)
+
     scored = score_occurrences(
-        df,
-        occs,
-        detoxify_model,
-        cardiffnlp_model,
-        audio_emotion_model,
-        wav_path,
-        clips_dir
+        df, occs, detoxify_model, cardiffnlp_model,
+        audio, sr, clips_dir, prosody_scores,
     )
 
     # Filter by minimum score
@@ -670,12 +595,12 @@ def main() -> None:
         return
 
     # Initialize models
-    logger.info(f"Loading models (Detoxify + cardiffnlp + audio emotion) for {len(pending)} file(s)...")
+    logger.info(f"Loading models (Detoxify + cardiffnlp) for {len(pending)} file(s)...")
     try:
-        detoxify_model, cardiffnlp_model, audio_emotion_model = build_models()
+        detoxify_model, cardiffnlp_model = build_models()
     except Exception as e:
-        # This stage feeds bias.py extra context; if its models can't load, log
-        # and let the pipeline continue rather than halting everything.
+        # If the text models can't load, log and let the pipeline continue
+        # rather than halting everything.
         logger.error(f"Could not load invective models, skipping this stage: {e}", exc_info=True)
         return
 
@@ -694,7 +619,6 @@ def main() -> None:
                 term_to_group,
                 detoxify_model,
                 cardiffnlp_model,
-                audio_emotion_model,
                 min_score=0.5
             )
             total_files += 1

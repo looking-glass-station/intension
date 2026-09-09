@@ -34,9 +34,9 @@ import numpy as np
 import pandas as pd
 import soundfile as sf
 import librosa
-import torch
 from tqdm_sound import TqdmSound
 
+from audio_affect import build_ser, ser_adv, aggression_from_adv
 from configs import get_global_config, iter_processing_configs
 from file_utils import filter_files_by_stems, dict_to_csv, audacity_writer
 from logger import global_logger
@@ -123,63 +123,8 @@ def tier1_score(row: dict, weights: Dict[str, float]) -> float:
 
 
 # --------------------------------------------------------------------------- #
-# Tier 2 - speech emotion (arousal / dominance / valence)
-# --------------------------------------------------------------------------- #
-class _RegressionHead(torch.nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.dense = torch.nn.Linear(config.hidden_size, config.hidden_size)
-        self.dropout = torch.nn.Dropout(config.final_dropout)
-        self.out_proj = torch.nn.Linear(config.hidden_size, config.num_labels)
-
-    def forward(self, x):
-        x = self.dropout(x)
-        x = torch.tanh(self.dense(x))
-        x = self.dropout(x)
-        return self.out_proj(x)
-
-
-def build_ser(model_id: str):
-    """
-    Returns (processor, model, device) for audeering's dimensional model, or
-    None if it can't be built. That model has a regression head, so it needs a
-    small custom class rather than a stock pipeline.
-    """
-    try:
-        from transformers import Wav2Vec2Processor, Wav2Vec2Model, Wav2Vec2PreTrainedModel
-
-        class EmotionModel(Wav2Vec2PreTrainedModel):
-            def __init__(self, config):
-                super().__init__(config)
-                self.wav2vec2 = Wav2Vec2Model(config)
-                self.classifier = _RegressionHead(config)
-                self.init_weights()
-
-            def forward(self, input_values):
-                hidden = self.wav2vec2(input_values)[0].mean(dim=1)
-                return self.classifier(hidden)
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        processor = Wav2Vec2Processor.from_pretrained(model_id)
-        model = EmotionModel.from_pretrained(model_id).to(device).eval()
-        return processor, model, device
-    except Exception:
-        return None
-
-
-@torch.no_grad()
-def ser_adv(clip: np.ndarray, sr: int, ser) -> Dict[str, float]:
-    """arousal / dominance / valence in [0, 1] for one audio clip."""
-    processor, model, device = ser
-    if clip.ndim > 1:
-        clip = clip.mean(axis=1)
-    if sr != 16000:
-        clip = librosa.resample(np.ascontiguousarray(clip), orig_sr=sr, target_sr=16000)
-    inputs = processor(clip, sampling_rate=16000, return_tensors="pt").input_values.to(device)
-    out = model(inputs)[0].cpu().numpy()  # [arousal, dominance, valence]
-    return {"arousal": float(out[0]), "dominance": float(out[1]), "valence": float(out[2])}
-
-
+# Tier 2 - speech emotion (arousal / dominance / valence). Model + scoring live
+# in audio_affect.py so invective.py shares one implementation.
 # --------------------------------------------------------------------------- #
 def aggression_score(row: dict, cfg: dict) -> float:
     """
@@ -194,14 +139,6 @@ def aggression_score(row: dict, cfg: dict) -> float:
     t2 = float(row["tier2_score"])
     w1, w2 = agg["tier1_weight"], agg["tier2_weight"]
     return round(float((w1 * t1 + w2 * t2) / (w1 + w2)), 3)
-
-
-def tier2_from_adv(adv: Dict[str, float], cfg: dict) -> float:
-    """aggressive ~ high arousal + high dominance + low valence."""
-    agg = cfg["aggression"]
-    a, d, v = adv["arousal"], adv["dominance"], 1.0 - adv["valence"]
-    wa, wd, wv = agg["arousal_weight"], agg["dominance_weight"], agg["valence_weight"]
-    return round(float((wa * a + wd * d + wv * v) / (wa + wd + wv)), 3)
 
 
 def process_transcript(transcript_file: Path, wav_file: Path,
@@ -267,7 +204,7 @@ def process_transcript(transcript_file: Path, wav_file: Path,
             r["arousal"] = round(adv["arousal"], 3)
             r["dominance"] = round(adv["dominance"], 3)
             r["valence"] = round(adv["valence"], 3)
-            r["tier2_score"] = tier2_from_adv(adv, cfg)
+            r["tier2_score"] = aggression_from_adv(adv, cfg["aggression"])
 
     flag_thr = cfg["flag_threshold"]
     labels = []

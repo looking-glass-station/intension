@@ -56,6 +56,7 @@ def main() -> None:
     import librosa
     import pandas as pd
     import prosody
+    import audio_affect
     from logger import global_logger
 
     cfg = prosody.load_prosody_config()
@@ -64,7 +65,7 @@ def main() -> None:
     if not pairs:
         raise SystemExit("no transcript/wav pairs found")
 
-    ser = prosody.build_ser(cfg["ser_model"])
+    ser = audio_affect.build_ser(cfg["ser_model"])
     if ser is None:
         raise SystemExit(f"could not build {cfg['ser_model']}")
     try:
@@ -120,8 +121,8 @@ def main() -> None:
             sf.write(cpath, clip, sr)
 
             c16 = librosa.resample(clip, orig_sr=sr, target_sr=16000) if sr != 16000 else clip
-            adv = prosody.ser_adv(clip, sr, ser)
-            t2 = prosody.tier2_from_adv(adv, cfg)
+            adv = audio_affect.ser_adv(clip, sr, ser)
+            t2 = audio_affect.aggression_from_adv(adv, cfg["aggression"])
             sup = ""
             if superb is not None:
                 try:

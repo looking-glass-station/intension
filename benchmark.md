@@ -398,3 +398,21 @@ individual clips — one rates a quiet segment 0.94 "angry" that the other rates
 calm, and vice-versa. `benchmarks/bench_prosody.py` extracts the candidate clips
 and builds a table to fill in by ear; `confs/prosody.json`'s weights and
 thresholds should be set against that, not trusted blind.
+
+### invective.py now shares this signal
+
+The audio side was consolidated into `src/audio_affect.py` (one SER
+implementation, one clip writer). `invective.py` dropped its own emotion model —
+it reads prosody's per-segment aggression score instead. A fix surfaced during
+the move: transformers 4.40 renamed wav2vec2's weight-normed positional-conv
+params, and `from_pretrained` was **silently leaving that layer randomly
+initialised** on the audeering checkpoint — a key remap in `build_ser` restores
+it (the numbers barely moved, but the warning and the non-determinism are gone).
+
+invective's tone signal is now deliberately **modulate-only**: it can keep an
+identity term said with venom out of the "neutral" bucket and confirm a
+likely-invective slur into "high confidence", but it can no longer push a segment
+into a finding on its own. With a working SER model, "heated debate *about* a
+group" scores 0.9+ aggression, and the old rules would have turned that into
+false-positive invective. On the sample, invective findings are now 100 %
+text-driven; the aggression score rides along in a column for the reviewer.
